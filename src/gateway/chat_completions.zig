@@ -204,7 +204,9 @@ pub fn failure_kind(status: std.http.Status) streams.FailureKind {
     return switch (status) {
         .bad_request => .invalid_request,
         .unauthorized => .unauthorized,
+        .payment_required => .insufficient_credits,
         .forbidden => .forbidden,
+        .request_timeout => .request_timeout,
         .payload_too_large => .request_too_large,
         .too_many_requests => .rate_limited,
         .internal_server_error => .server_error,
@@ -213,6 +215,13 @@ pub fn failure_kind(status: std.http.Status) streams.FailureKind {
         .gateway_timeout => .gateway_timeout,
         else => .provider_error,
     };
+}
+
+test "chat completions failure kinds classify credits and timeouts" {
+    try std.testing.expectEqual(streams.FailureKind.insufficient_credits, failure_kind(.payment_required));
+    try std.testing.expectEqual(streams.FailureKind.request_timeout, failure_kind(.request_timeout));
+    try std.testing.expectEqual(streams.FailureKind.rate_limited, failure_kind(.too_many_requests));
+    try std.testing.expectEqual(streams.FailureKind.provider_error, failure_kind(.not_found));
 }
 
 /// Parses a successful streamed reply from `reader`.

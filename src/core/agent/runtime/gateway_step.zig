@@ -191,7 +191,9 @@ fn failureMetricCode(kind: agent_stream_provider.FailureKind) u16 {
     return switch (kind) {
         .invalid_request => 400,
         .unauthorized => 401,
+        .insufficient_credits => 402,
         .forbidden => 403,
+        .request_timeout => 408,
         .request_too_large => 413,
         .rate_limited => 429,
         .server_error => 500,

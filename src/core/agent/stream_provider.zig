@@ -272,7 +272,9 @@ pub const ResultOwnership = enum {
 pub const FailureKind = enum {
     invalid_request,
     unauthorized,
+    insufficient_credits,
     forbidden,
+    request_timeout,
     request_too_large,
     rate_limited,
     server_error,

@@ -4429,16 +4429,25 @@ test "discarded completion prose preserves ownership and fails atomically" {
 
 fn isRetryableModelFailure(kind: agent_stream_provider.FailureKind) bool {
     return switch (kind) {
-        .rate_limited, .server_error, .bad_gateway, .unavailable, .gateway_timeout => true,
+        .request_timeout, .rate_limited, .server_error, .bad_gateway, .unavailable, .gateway_timeout => true,
         else => false,
     };
+}
+
+test "request timeouts retry and exhausted credits do not" {
+    try std.testing.expect(isRetryableModelFailure(.request_timeout));
+    try std.testing.expect(!isRetryableModelFailure(.insufficient_credits));
+    try std.testing.expectEqual(std.http.Status.payment_required, failureHttpStatus(.insufficient_credits));
+    try std.testing.expectEqual(std.http.Status.request_timeout, failureHttpStatus(.request_timeout));
 }
 
 fn failureHttpStatus(kind: agent_stream_provider.FailureKind) std.http.Status {
     return switch (kind) {
         .invalid_request => .bad_request,
         .unauthorized => .unauthorized,
+        .insufficient_credits => .payment_required,
         .forbidden => .forbidden,
+        .request_timeout => .request_timeout,
         .request_too_large => .payload_too_large,
         .rate_limited => .too_many_requests,
         .server_error => .internal_server_error,

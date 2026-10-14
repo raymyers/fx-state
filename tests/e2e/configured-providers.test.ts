@@ -156,6 +156,25 @@ describe("configured providers", () => {
     } finally { f.close(); }
   }, 25000);
 
+  test("HTTP 402 stops without retry and HTTP 408 is retried", async () => {
+    let calls = 0;
+    const f = fixture(body => {
+      calls++;
+      if (body.messages.at(-1).content.includes("credits")) return new Response(JSON.stringify({ error: { code: 402, message: "Insufficient credits" } }), { status: 402 });
+      return calls === 1 ? new Response(JSON.stringify({ error: { code: 408, message: "Request timed out" } }), { status: 408 }) : completion(body.model);
+    });
+    try {
+      const retried = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
+      if (retried.code !== 0) throw new Error(retried.stdout + retried.stderr);
+      expect(JSON.parse(retried.stdout).output).toBe("local reply");
+      expect(f.requests).toHaveLength(2);
+      const stopped = await runFx(["ask", "--json", "--no-save", "out of credits"], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
+      expect(stopped.code).not.toBe(0);
+      expect(stopped.stderr).toContain("Insufficient credits");
+      expect(f.requests).toHaveLength(3);
+    } finally { f.close(); }
+  }, 45000);
+
   test("a mid-stream provider error stops without retry and reports its code and message", async () => {
     const f = fixture(body => streamError(body.model, 402, "Insufficient credits", "partial "));
     try {
