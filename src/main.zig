@@ -3146,6 +3146,7 @@ const App = struct {
         );
 
         if (try self.model_cache.pollLoadTransition()) {
+            try provider_runtime.noteCatalogMiss(self);
             RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
         }
         if (try app_commands.Handlers(App).collectUsageDashboardFacts(self)) {

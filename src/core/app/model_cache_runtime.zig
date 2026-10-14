@@ -574,6 +574,15 @@ pub const Runtime = struct {
         return try model_catalog.projectModelIds(alloc, self.catalog.items);
     }
 
+    /// True when a catalog has loaded and does not list `model`.
+    pub fn catalogOmits(self: *Self, model: []const u8) bool {
+        self.finishThreadIfDone();
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.state != .ready or self.catalog.items.len == 0) return false;
+        return findCatalogModel(self.catalog.items, model) == null;
+    }
+
     pub fn metadataForModel(self: *Self, model: []const u8) ?model_capabilities.GatewayMetadata {
         self.finishThreadIfDone();
         self.mutex.lockUncancelable(io_mod.getIo());

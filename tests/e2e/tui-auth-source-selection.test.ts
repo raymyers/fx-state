@@ -3114,6 +3114,37 @@ tmuxTest(
 );
 
 tmuxTest(
+  "an OpenRouter model missing from the catalog is noted once",
+  async () => {
+    const f = createOpenRouterFixture();
+    stderrPath = join(f.home, "stderr.log");
+    gateway = startFakeGateway();
+    try {
+      session = await startFx(f.home, stderrPath, gateway, undefined, undefined, {
+        FX_PROVIDER: "openrouter",
+        FX_MODEL: "missing/model",
+        OPENROUTER_API_KEY: "sk-or-test-key",
+        FX_E2E_OPENROUTER_BASE_URL: f.env.FX_E2E_OPENROUTER_BASE_URL,
+      }, f.workspace);
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("/model");
+      await session.waitForText("OpenRouter's model list doesn't include missing/model", TIMEOUT);
+      await session.sendKeys("Escape");
+      await session.sendText("/model");
+      await Bun.sleep(500);
+      const scrollback = await session.captureFullScrollback();
+      expect(scrollback.split("OpenRouter's model list doesn't include missing/model").length - 1).toBe(1);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      await session?.kill();
+      session = null;
+      f.close();
+    }
+  },
+  60_000,
+);
+
+tmuxTest(
   "the /login picker signs in to OpenRouter with the browser and /logout removes the key",
   async () => {
     const f = createOpenRouterFixture();

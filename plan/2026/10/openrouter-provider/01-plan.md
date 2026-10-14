@@ -116,7 +116,8 @@ Tasks:
 - [x] Provide `cli_model_catalog` and `model_catalog`, so `/model` and `fx models` list catalog models with their context size.
 - [ ] `src/gateway/openrouter.zig`: wrap the shared protocol. Add the `HTTP-Referer` and `X-OpenRouter-Title` headers, always send `tool_choice`, take `max_tokens` from the catalog, and reuse a pooled HTTP client.
   - Done: attribution headers, `tool_choice`, and `max_tokens` from catalog capabilities. Open: the pooled HTTP client; each request still opens its own connection.
-- [ ] When a model is missing from the catalog, warn once and fall back to unknown limits.
+- [x] When a model is missing from the catalog, warn once and fall back to unknown limits.
+  - The interactive session warns once per model after the catalog loads. `fx ask` falls back silently, because it resolves capabilities inside the turn loop.
 - [ ] `src/gateway/openrouter_permission_reviewer.zig`: use a fixed reviewer model (spec open question 1) with a forced tool call.
 - [ ] Set `title_model` on the bundle.
 - [x] `src/builtins/providers.zig`: wire the native bundle.

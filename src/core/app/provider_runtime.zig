@@ -17,6 +17,9 @@ pub const Runtime = struct {
     /// so the pointer stays stable when this Runtime is copied by value; null
     /// when allocation failed (requests then dial per attempt, as before).
     gateway_http_pool: ?*http_pool.HttpPool = null,
+    /// The notice about a model missing from OpenRouter's catalog was shown
+    /// for the current model.
+    catalog_miss_noted: bool = false,
 
     pub fn init(alloc: Allocator) Self {
         return .{ .alloc = alloc };
@@ -74,6 +77,7 @@ pub const Runtime = struct {
         self.model = .fromOwnedSlice(owned_model.*);
         owned_model.* = &.{};
         self.active_provider = target_provider;
+        self.catalog_miss_noted = false;
     }
 };
 
@@ -105,6 +109,21 @@ pub fn provider(app: anytype) model_provider.ProviderId {
         return .gateway;
     }
     @compileError("app must own provider_selection");
+}
+
+/// Says once per model when OpenRouter's catalog lacks the selected model, so
+/// its limits are unknown and compaction waits for the provider to refuse.
+pub fn noteCatalogMiss(app: anytype) !void {
+    const App = @TypeOf(app.*);
+    if (comptime !@hasField(App, "provider_selection") or !@hasField(App, "model_cache")) return;
+    const selection = &app.provider_selection;
+    if (selection.active_provider != .openrouter or selection.catalog_miss_noted) return;
+    const selected = selection.model.items;
+    if (!app.model_cache.catalogOmits(selected)) return;
+    selection.catalog_miss_noted = true;
+    const body = try app.alloc.print("OpenRouter's model list doesn't include {s}, so its context window is unknown. fx compacts only when OpenRouter reports that the context is full.", .{selected});
+    defer app.alloc.free(body);
+    try app.writeDomainNotice(.{ .topic = "provider", .tone = .warning, .body = body }, true);
 }
 
 pub fn replaceModel(app: anytype, value: []const u8) !void {
