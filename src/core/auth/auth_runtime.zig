@@ -3028,6 +3028,18 @@ pub const Runtime = struct {
         return was_active or was_available;
     }
 
+    pub fn reconcileAfterOpenRouterLogout(self: *Self, alloc: Allocator) !bool {
+        const was_available = self.source_inventory.contains(.openrouter_login);
+        const was_active = self.credentialSource() == .openrouter_login;
+        if (was_active) {
+            if (self.selected_credential) |*credential| credential.deinit(alloc);
+            self.selected_credential = null;
+            self.credential_failure = null;
+        }
+        try self.refreshSourceInventory(alloc);
+        return was_active or was_available;
+    }
+
     pub fn reconcileAfterFxLoginLogout(self: *Self, alloc: Allocator) !bool {
         return self.reconcileAfterFxLoginLogoutWithDeps(
             alloc,

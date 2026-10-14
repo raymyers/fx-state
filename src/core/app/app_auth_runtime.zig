@@ -11,6 +11,7 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
+const openrouter_oauth = @import("../auth/openrouter_oauth.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
 const auth_transition = @import("../auth/auth_transition.zig");
 const model_provider = @import("../config/model_provider.zig");
@@ -275,7 +276,7 @@ pub fn Runtime(comptime App: type) type {
                     try writeAuthNotice(app, .{
                         .topic = "",
                         .tone = .warning,
-                        .body = "usage: /logout [vercel|codex|grok]",
+                        .body = "usage: /logout [vercel|codex|grok|openrouter]",
                     });
                     return;
                 };
@@ -304,6 +305,31 @@ pub fn Runtime(comptime App: type) type {
                 return;
             }
             defer if (hold_turn_start) app.worker.releaseTurnStartHold();
+            if (logout_provider == .openrouter) {
+                const outcome = openrouter_oauth.logout() catch {
+                    try writeAuthNotice(app, .{
+                        .topic = "auth",
+                        .tone = .@"error",
+                        .body = "Could not durably remove the saved OpenRouter key. The current source is unchanged.",
+                    });
+                    return;
+                };
+                const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterOpenRouterLogout"))
+                    try app.auth.reconcileAfterOpenRouterLogout(app.alloc)
+                else
+                    false;
+                applyCredentialChange(app, changed);
+                try writeAuthNotice(app, switch (outcome) {
+                    .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Signed out of OpenRouter. " ++ openrouter_oauth.logout_notice },
+                    .missing => .{ .topic = "auth", .tone = .neutral, .body = "No saved OpenRouter key found." },
+                    .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Signed out of OpenRouter, but could not confirm the profile directory update." },
+                });
+                // OPENROUTER_API_KEY keeps the provider usable after the saved key is gone.
+                if (provider_runtime.provider(app) == .openrouter and app.auth.pickerView().available_sources.contains(.openrouter_api_key)) {
+                    try startProviderSwitch(app, .openrouter, false, .manual, null);
+                } else try reconcileSubscriptionLogout(app, .openrouter);
+                return;
+            }
             if (logout_provider == .grok) {
                 const outcome = grok_oauth.logout(app.alloc, app.auth.oauthTransport()) catch {
                     try writeAuthNotice(app, .{
@@ -798,6 +824,10 @@ pub fn Runtime(comptime App: type) type {
                         },
                         .grok => {
                             try finishSubscriptionSignIn(app, .grok);
+                            return;
+                        },
+                        .openrouter => {
+                            try finishSubscriptionSignIn(app, .openrouter);
                             return;
                         },
                     }

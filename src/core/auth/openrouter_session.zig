@@ -17,9 +17,78 @@ const max_auth_file_bytes: usize = 64 * 1024;
 const max_key_bytes: usize = 1024;
 
 const auth_file_name = profile_paths.openrouter_auth_file_name;
+const mutation_lock_file_name = "openrouter-auth.lock";
+const mutation_lock_deadline_ms: u64 = 2000;
 
 pub fn presence() host.SecretStorePresence {
     return session_presence.profileFile(auth_file_name, max_auth_file_bytes);
+}
+
+pub fn requireSignInStorage() error{CredentialStorageUnavailable}!void {
+    _ = try session_presence.requireWritableProfileFile(auth_file_name, mutation_lock_file_name);
+}
+
+pub const DeleteOutcome = enum {
+    deleted,
+    missing,
+    deleted_not_durable,
+};
+
+/// Replaces any saved key. The key must already be validated.
+pub fn save(alloc: Allocator, key: []const u8) !void {
+    if (comptime host_target.is_wasm) return error.OpenRouterSignInUnavailable;
+    if (!validKey(key)) return error.InvalidOpenRouterAuthSession;
+    const home = io_mod.homeDir() orelse return error.HomeNotSet;
+    var home_dir = io_mod.VerifiedDir{
+        .dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }) catch |err| return session_presence.storageError(auth_file_name, err),
+    };
+    defer home_dir.close();
+    var fx_dir = try io_mod.openOrCreateVerifiedPrivateDir(&home_dir, profile_paths.root_dir_name);
+    defer fx_dir.close();
+    var lock = io_mod.acquireTimedAdvisoryLock(&fx_dir, mutation_lock_file_name, mutation_lock_deadline_ms) catch |err| return session_presence.storageError(auth_file_name, err);
+    defer lock.release();
+    const text = try stringify(alloc, key);
+    defer secret.zeroAndFree(alloc, text);
+    try io_mod.durableReplaceVerified(alloc, &fx_dir, auth_file_name, text);
+}
+
+/// Removes the saved key from this machine. The key itself stays valid on
+/// OpenRouter until it is deleted there.
+pub fn delete() !DeleteOutcome {
+    if (comptime host_target.is_wasm) return .missing;
+    const home = io_mod.homeDir() orelse return .missing;
+    var home_dir = io_mod.VerifiedDir{
+        .dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => return .missing,
+            else => return session_presence.storageError(auth_file_name, err),
+        },
+    };
+    defer home_dir.close();
+    var fx_dir = io_mod.VerifiedDir{
+        .dir = home_dir.dir.openDir(io_mod.getIo(), profile_paths.root_dir_name, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return .missing,
+            else => return session_presence.storageError(auth_file_name, err),
+        },
+    };
+    defer fx_dir.close();
+    var lock = io_mod.acquireTimedAdvisoryLock(&fx_dir, mutation_lock_file_name, mutation_lock_deadline_ms) catch |err| return session_presence.storageError(auth_file_name, err);
+    defer lock.release();
+    fx_dir.dir.deleteFile(io_mod.getIo(), auth_file_name) catch |err| switch (err) {
+        error.FileNotFound => return .missing,
+        else => return err,
+    };
+    const durable: io_mod.DurableOps = .{};
+    durable.sync_dir(durable.ctx, fx_dir.dir) catch return .deleted_not_durable;
+    return .deleted;
+}
+
+fn stringify(alloc: Allocator, key: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.writeAll("{\"version\":1,\"api_key\":");
+    try std.json.Stringify.value(key, .{}, &out.writer);
+    try out.writer.writeAll("}\n");
+    return out.toOwnedSlice();
 }
 
 /// A key is sent as a bearer token, so it must be printable ASCII without spaces.
@@ -99,4 +168,13 @@ test "OpenRouter saved key parses only a bounded header-safe key" {
         "{\"version\":1,\"api_key\":\"sk or\"}",
         "{\"version\":1,\"api_key\":7}",
     }) |invalid| try std.testing.expectError(error.InvalidOpenRouterAuthSession, parse(alloc, invalid));
+}
+
+test "OpenRouter saved key round trips through its file format" {
+    const alloc = std.testing.allocator;
+    const text = try stringify(alloc, "sk-or-v1-round-trip");
+    defer secret.zeroAndFree(alloc, text);
+    const key = try parse(alloc, text);
+    defer secret.zeroAndFree(alloc, key);
+    try std.testing.expectEqualStrings("sk-or-v1-round-trip", key);
 }

@@ -10364,7 +10364,7 @@ describe("acp: model catalog authentication", () => {
         expect(providerOption.options).toContainEqual({ value: "openrouter", name: "OpenRouter" });
         const changed = await client.request("session/set_config_option", { configId: "provider", value: "openrouter" }, 3) as any;
         if (!keyed) {
-          expect(changed.error.message).toContain("Set OPENROUTER_API_KEY");
+          expect(changed.error.message).toContain("Run fx login openrouter or set OPENROUTER_API_KEY");
           expect(requests).toHaveLength(0);
           return;
         }

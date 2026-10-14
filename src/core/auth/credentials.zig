@@ -258,8 +258,8 @@ pub const missing_chatgpt_credential_message = "fx needs a Codex subscription lo
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login, open Connections, then choose Codex subscription.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
 pub const missing_grok_interactive_credential_message = "Grok needs a subscription login. Run /login, open Connections, then choose Grok subscription.";
-pub const missing_openrouter_credential_message = "fx needs an OpenRouter API key for this model. Set OPENROUTER_API_KEY; no other provider was selected.";
-pub const missing_openrouter_interactive_credential_message = "OpenRouter needs an API key. Set OPENROUTER_API_KEY and restart fx; no other provider was selected.";
+pub const missing_openrouter_credential_message = "fx needs an OpenRouter API key for this model. Run fx login openrouter or set OPENROUTER_API_KEY; no other provider was selected.";
+pub const missing_openrouter_interactive_credential_message = "OpenRouter needs an API key. Run /login and choose OpenRouter, or set OPENROUTER_API_KEY; no other provider was selected.";
 pub const unreadable_store_message = "fx could not read the stored API key from " ++ stored_key_backend_label ++ ". A key may be saved but unreadable. Set FX_TRACE_LOG for the failing step, or set AI_GATEWAY_API_KEY.";
 pub const host_managed_auth_message = "Authentication is managed by the host.";
 
@@ -667,6 +667,7 @@ pub fn requireSignInStorage(source: Source) error{CredentialStorageUnavailable}!
         .fx_login => try oauth_session.requireSignInStorage(),
         .chatgpt_subscription => try chatgpt_session.requireSignInStorage(),
         .grok_subscription => try grok_session.requireSignInStorage(),
+        .openrouter_login => try openrouter_session.requireSignInStorage(),
         else => {},
     }
 }

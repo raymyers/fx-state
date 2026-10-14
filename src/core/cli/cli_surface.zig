@@ -5,6 +5,7 @@ const app_lifecycle = @import("../app/app_lifecycle.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
+const openrouter_oauth = @import("../auth/openrouter_oauth.zig");
 const acp_runner = @import("acp_runner.zig");
 const cli_ask = @import("cli_ask.zig");
 const cli_replay = @import("cli_replay.zig");
@@ -253,6 +254,18 @@ pub const Config = struct {
 const LocalSurfaceOptions = struct {
     format: output_contracts.OutputFormat = .text,
 };
+
+const OpenRouterLoginMethod = enum { browser, headless, api_key };
+
+/// `fx login openrouter` takes one optional method flag; other providers take none.
+fn parseOpenRouterLoginMethod(rest: []const [:0]const u8) !?OpenRouterLoginMethod {
+    if (rest.len == 0 or (provider_catalog.parse(rest[0]) orelse return null) != .openrouter) return null;
+    if (rest.len == 1) return .browser;
+    if (rest.len != 2) return error.InvalidLoginProviderArgs;
+    if (std.mem.eql(u8, rest[1], "--headless")) return .headless;
+    if (std.mem.eql(u8, rest[1], "--api-key")) return .api_key;
+    return error.InvalidLoginProviderArgs;
+}
 
 fn parseLoginProvider(rest: []const [:0]const u8) !?model_provider.ProviderId {
     if (rest.len == 0) return null;
@@ -837,7 +850,7 @@ fn runProviderLogin(alloc: Allocator, cfg: Config, provider: model_provider.Prov
         .gateway => try login_flow.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
         .codex => try chatgpt_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
         .grok => try grok_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
-        .openrouter => return error.OpenRouterUsesEnvironmentKey,
+        .openrouter => try openrouter_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener, .browser),
         .configured => return error.ConfiguredProviderUsesEnvironmentAuth,
     }
 }
@@ -855,7 +868,10 @@ fn writeProviderLoginFailure(alloc: Allocator, deps: RunDeps, provider: model_pr
         error.ClientIdMissing => "missing FX_OAUTH_CLIENT_ID; configure the fx Vercel App client id first",
         error.AccessDenied, error.ChatGptAuthorizationFailed, error.GrokAuthorizationFailed => "authorization denied",
         error.ExpiredToken, error.LoginTimedOut, error.ChatGptLoginTimedOut, error.GrokLoginTimedOut => "authorization expired; run fx login again",
-        error.OpenRouterUsesEnvironmentKey => "OpenRouter uses an API key; set OPENROUTER_API_KEY",
+        error.OpenRouterCodeRejected => "the authorization code expired or was already used; run fx login openrouter again",
+        error.OpenRouterChallengeMismatch => "OpenRouter rejected the sign-in request; run fx login openrouter again",
+        error.OpenRouterKeyRejected, error.InvalidOpenRouterKey => "OpenRouter rejected the API key",
+        error.OpenRouterAuthorizationDenied, error.OpenRouterStateMismatch => "authorization denied",
         else => "failed to sign in",
     });
 }
@@ -1198,13 +1214,34 @@ fn runNonInteractiveWithDeps(
         .pr => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .pull_request),
         .issue => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .issue),
         .login => |rest| {
-            const maybe_login_provider = parseLoginProvider(rest) catch {
-                try writeStderr(deps, "usage: fx login [vercel|codex|grok]\n");
+            const login_usage = "usage: fx login [vercel|codex|grok|openrouter [--headless|--api-key]]\n";
+            const openrouter_method = parseOpenRouterLoginMethod(rest) catch {
+                try writeStderr(deps, login_usage);
+                return .handled_failure;
+            };
+            const maybe_login_provider = if (openrouter_method != null) .openrouter else parseLoginProvider(rest) catch {
+                try writeStderr(deps, login_usage);
                 return .handled_failure;
             };
             if (cfg.auth_mode == .host_managed) {
                 try writeHostManagedAuthResult(deps);
                 return .handled_success;
+            }
+            if (openrouter_method) |method| {
+                if (method != .browser) {
+                    const signed_in = switch (method) {
+                        .headless => if (openrouter_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener, .headless)) true else |err| failed: {
+                            try writeProviderLoginFailure(alloc, deps, .openrouter, .provider_login, err);
+                            break :failed false;
+                        },
+                        .api_key => try saveOpenRouterApiKey(alloc, cfg, deps),
+                        .browser => unreachable,
+                    };
+                    if (!signed_in) return .handled_failure;
+                    if (!try activateProviderSelection(alloc, cfg, deps, .openrouter, .provider_login, null)) return .handled_failure;
+                    try writeStdout(deps, "Signed in to OpenRouter.\n");
+                    return .handled_success;
+                }
             }
             // Preserve the original `fx login` behavior for scripts and users.
             const login_provider = maybe_login_provider orelse .gateway;
@@ -1224,14 +1261,14 @@ fn runNonInteractiveWithDeps(
                 .gateway => "Signed in to Vercel.\nAI Gateway access may still require billing or API setup for the selected account.\n",
                 .codex => "Signed in with Codex.\n",
                 .grok => "Signed in with Grok.\n",
-                .openrouter => unreachable,
+                .openrouter => "Signed in to OpenRouter.\n",
                 .configured => "Configured providers use settings.json authentication.\n",
             });
             return .handled_success;
         },
         .logout => |rest| {
             const maybe_login_provider = parseLoginProvider(rest) catch {
-                try writeStderr(deps, "usage: fx logout [vercel|codex|grok]\n");
+                try writeStderr(deps, "usage: fx logout [vercel|codex|grok|openrouter]\n");
                 return .handled_failure;
             };
             if (cfg.auth_mode == .host_managed) {
@@ -1256,6 +1293,26 @@ fn runNonInteractiveWithDeps(
                     },
                     .deleted_not_durable => result: {
                         try writeStderr(deps, "fx logout: failed to durably remove saved Codex login\n");
+                        break :result .handled_failure;
+                    },
+                };
+            }
+            if (login_provider == .openrouter) {
+                const outcome = openrouter_oauth.logout() catch {
+                    try writeStderr(deps, "fx logout: failed to durably remove the saved OpenRouter key\n");
+                    return .handled_failure;
+                };
+                return switch (outcome) {
+                    .deleted => result: {
+                        try writeStdout(deps, "Signed out of OpenRouter. " ++ openrouter_oauth.logout_notice ++ "\n");
+                        break :result .handled_success;
+                    },
+                    .missing => result: {
+                        try writeStdout(deps, "No saved OpenRouter key found.\n");
+                        break :result .handled_success;
+                    },
+                    .deleted_not_durable => result: {
+                        try writeStderr(deps, "fx logout: failed to durably remove the saved OpenRouter key\n");
                         break :result .handled_failure;
                     },
                 };
@@ -2102,6 +2159,45 @@ fn writeStdout(deps: RunDeps, text: []const u8) !void {
 
 fn writeStderr(deps: RunDeps, text: []const u8) !void {
     try deps.write_stderr(deps.stderr_ctx, text);
+}
+
+/// Reads a key without echo on a terminal, or one line from piped stdin.
+fn saveOpenRouterApiKey(alloc: Allocator, cfg: Config, deps: RunDeps) !bool {
+    const key = if (deps.setup_terminal_available(deps.setup_ctx)) read: {
+        try writeStderr(deps, "Paste OpenRouter API key (input hidden): ");
+        const typed = deps.read_masked_key(deps.setup_ctx, alloc, deps.write_stderr, deps.stderr_ctx) catch {
+            try writeStderr(deps, "\nfx login: API key was not saved\n");
+            return false;
+        };
+        try writeStderr(deps, "\n");
+        break :read typed;
+    } else readPipedKey(alloc) catch {
+        try writeStderr(deps, "fx login: could not read an API key from stdin\n");
+        return false;
+    };
+    defer secret.zeroAndFree(alloc, key);
+    openrouter_oauth.saveApiKey(alloc, cfg.gateway_provider.oauth_transport, key) catch |err| {
+        try writeProviderLoginFailure(alloc, deps, .openrouter, .provider_login, err);
+        return false;
+    };
+    return true;
+}
+
+/// Caller owns the key and must release it with secret.zeroAndFree.
+fn readPipedKey(alloc: Allocator) ![]u8 {
+    var buffer: [1025]u8 = undefined;
+    defer @memset(&buffer, 0);
+    var len: usize = 0;
+    while (len < buffer.len) {
+        const read = try std.posix.read(std.posix.STDIN_FILENO, buffer[len..]);
+        if (read == 0) break;
+        len += read;
+        if (std.mem.findScalar(u8, buffer[0..len], '\n') != null) break;
+    }
+    const line = buffer[0 .. std.mem.findScalar(u8, buffer[0..len], '\n') orelse len];
+    const key = std.mem.trim(u8, line, " \t\r");
+    if (key.len == 0 or key.len >= buffer.len) return error.InvalidOpenRouterKey;
+    return alloc.dupe(u8, key);
 }
 
 fn runPasteSetup(

@@ -88,16 +88,16 @@ OpenRouter's flow returns a long-lived API key, not an access token, so there is
 
 Tasks:
 
-- [ ] `src/core/auth/openrouter_oauth.zig`: build the authorization URL (`callback_url`, S256 `code_challenge`, `state`, `key_label=fx`) with the `oauth.zig` helpers, and exchange the code at `POST /api/v1/auth/keys`.
-- [ ] Loopback callback: reuse `browser_callback.zig` on a random localhost port, check `state`, and time out after 10 minutes to match the code lifetime.
-- [ ] Headless flow: omit `callback_url`, read the pasted code, and exchange it. Use it for `--headless` and automatically when no browser can be opened.
-- [ ] `--api-key`: hidden key entry.
-- [ ] Validate every new key with `GET /api/v1/key` before storing it.
-- [ ] `fx login openrouter` and `fx logout openrouter` in `cli_surface.zig`. Logout deletes the stored key and says that the key remains active on OpenRouter until it is deleted in OpenRouter's key settings.
+- [x] `src/core/auth/openrouter_oauth.zig`: build the authorization URL (`callback_url`, S256 `code_challenge`, `state`, `key_label=fx`) with the `oauth.zig` helpers, and exchange the code at `POST /api/v1/auth/keys`.
+- [x] Loopback callback: reuse `browser_callback.zig` on a random localhost port, check `state`, and time out after 10 minutes to match the code lifetime.
+- [x] Headless flow: omit `callback_url`, read the pasted code, and exchange it. Use it for `--headless` and automatically when no browser can be opened.
+- [x] `--api-key`: hidden key entry.
+- [x] Validate every new key with `GET /api/v1/key` before storing it.
+- [x] `fx login openrouter` and `fx logout openrouter` in `cli_surface.zig`. Logout deletes the stored key and says that the key remains active on OpenRouter until it is deleted in OpenRouter's key settings.
 - [ ] TUI: add the OpenRouter `/login` picker row with "Sign in with browser" and "Paste API key", and `/logout openrouter`, in `auth_runtime.zig` and `app_auth_runtime.zig`.
-- [ ] ACP: tell an ACP client with no OpenRouter credential how to sign in.
-- [ ] `commands.zig`: `fx login` and `fx logout` usage text, including `--headless` and `--api-key`.
-- [ ] Test seam: `FX_E2E_OPENROUTER_AUTH_URL` (loopback only) and an injectable browser opener.
+- [x] ACP: tell an ACP client with no OpenRouter credential how to sign in.
+- [x] `commands.zig`: `fx login` and `fx logout` usage text, including `--headless` and `--api-key`.
+- [x] Test seam: `FX_E2E_OPENROUTER_AUTH_URL` (loopback only) and an injectable browser opener.
 
 Deliverables and tests:
 
