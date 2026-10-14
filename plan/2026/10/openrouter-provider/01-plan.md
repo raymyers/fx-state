@@ -180,6 +180,8 @@ Tasks:
 - [x] `napi_core_main.zig` and `wasm_core_main.zig`: accept `openrouter` with a host-supplied key, and add OpenRouter variants to `host_stream_provider` and `host_model_catalog`.
 - [x] `sdk/`: add type definitions, a provider string, an error code for a missing key, and a test under `sdk/tests/`. Update `sdk/README.md`.
 - [ ] `CHANGELOG.md`: add the entry in the next release PR, not in this PR.
+
+CI on 2026-10-14: every required check passed on commit 61b8cfe8 of https://github.com/raymyers/fx-state/pull/1, including macOS arm64. One SDK Bun test (`test-native-core-misuse.mjs`) and one macOS TUI timing test failed once each and passed on rerun; neither covers code this work changed.
   - The breaking-change line for a custom connection named `openrouter` is in [docs-section.md](docs-section.md).
 - [x] Manual at fx.sh/docs: open a companion PR for a new "OpenRouter" page under configure-fx, and update the custom-connections page to point to it. If the private repository is not accessible, add a `## Docs` section to the PR description instead.
   - The private docs repository isn't accessible to this account, so the `## Docs` section from [docs-section.md](docs-section.md) is in the description of https://github.com/raymyers/fx-state/pull/1. The public manual won't be updated from this fork, so [docs/openrouter.md](../../../../docs/openrouter.md) records the behavior and decisions internally. The published custom-connections page uses a connection named `openrouter`, which now fails to load, so the draft replaces that example and adds a breaking-change line for the release notes.
