@@ -48,7 +48,6 @@ pub const Error = error{
     InconsistentFinishReason,
     IncompleteStream,
     StreamClosed,
-    ProviderError,
     OutputTruncated,
     ContentFiltered,
     Refused,
@@ -665,6 +664,8 @@ pub const Reducer = struct {
     reasoning_bytes: usize = 0,
     refusal_seen: bool = false,
     finish_reason: ?types.ProviderFinishReason = null,
+    failure_detail: ?[]u8 = null,
+    failure_cause: ?types.ProviderFailureCause = null,
     phase: enum { receiving, finished, done, closed } = .receiving,
     event_count: usize = 0,
     json_bytes: usize = 0,
@@ -693,6 +694,7 @@ pub const Reducer = struct {
         self.reasoning_details.bytes.deinit(self.alloc);
         if (self.generation_id) |id| self.alloc.free(id);
         if (self.response_model) |model| self.alloc.free(model);
+        if (self.failure_detail) |detail| self.alloc.free(detail);
         self.* = undefined;
     }
 
@@ -720,7 +722,13 @@ pub const Reducer = struct {
         };
         defer parsed.deinit();
         const root = try object(parsed.value);
-        if (non_null(root, "error") != null) return error.ProviderError;
+        // A provider error ends the stream whether or not [DONE] follows it.
+        if (reports_error(root)) {
+            try self.accept_failure(root);
+            self.finish_reason = .provider_error;
+            self.phase = .done;
+            return .{};
+        }
         try self.accept_identity(&self.generation_id, non_null(root, "id"), self.limits.identity_bytes);
         try self.accept_identity(&self.response_model, non_null(root, "model"), configured_provider.max_model_bytes);
         const choices_value = root.get("choices") orelse return error.InvalidChunk;
@@ -936,6 +944,23 @@ pub const Reducer = struct {
         self.usage_final_fields = final_fields;
     }
 
+    fn accept_failure(self: *Reducer, root: std.json.ObjectMap) Error!void {
+        const fields: ?std.json.ObjectMap = if (non_null(root, "error")) |value| (if (value == .object) value.object else null) else null;
+        const code: ?[]const u8 = if (fields) |error_fields| if (non_null(error_fields, "code")) |value| switch (value) {
+            .string => |text| text,
+            .number_string => |text| text,
+            else => null,
+        } else null else null;
+        const message: ?[]const u8 = if (fields) |error_fields| if (non_null(error_fields, "message")) |value| (if (value == .string) value.string else null) else null else null;
+        const bounded_code = types.ModelFailureDiagnostic.init(code orelse "provider_error");
+        const bounded_message = types.ModelFailureDiagnostic.init(message orelse "Provider response failed");
+        var buffer: [2 * types.ModelFailureDiagnostic.max_bytes + 2]u8 = undefined;
+        const text = std.mem.print(&buffer, "{s}: {s}", .{ bounded_code.view(), bounded_message.view() }) catch unreachable;
+        const detail = types.ModelFailureDiagnostic.init(text);
+        self.failure_detail = try self.alloc.dupe(u8, detail.view());
+        self.failure_cause = failure_cause(code);
+    }
+
     /// Requires finish_reason followed by [DONE]. Length/filter/refusal are
     /// explicit errors, never executable partial calls or successful tool turns.
     /// Results use stream_provider.Result.deinit with this reducer's allocator.
@@ -946,6 +971,17 @@ pub const Reducer = struct {
         if (self.phase != .done) return error.IncompleteStream;
         const reason = self.finish_reason.?;
         switch (reason) {
+            .provider_error => {
+                const generation_id = self.generation_id;
+                self.generation_id = null;
+                const detail = self.failure_detail;
+                self.failure_detail = null;
+                self.phase = .closed;
+                return .{ .completed = .{
+                    .completion = .{ .generation_id = generation_id, .finish_reason = reason, .usage = self.usage, .provider_failure_cause = self.failure_cause, .provider_failure_detail = detail },
+                    .ownership = .owned,
+                } };
+            },
             .length => return error.OutputTruncated,
             .content_filter => return error.ContentFiltered,
             .stop, .tool_calls => {},
@@ -998,6 +1034,30 @@ pub const Reducer = struct {
         } };
     }
 };
+
+/// OpenRouter reports a failure after a 200 status as a top-level error object,
+/// usually alongside finish_reason "error" on the only choice.
+fn reports_error(root: std.json.ObjectMap) bool {
+    if (non_null(root, "error") != null) return true;
+    const choices = non_null(root, "choices") orelse return false;
+    if (choices != .array or choices.array.items.len == 0 or choices.array.items[0] != .object) return false;
+    const reason = non_null(choices.array.items[0].object, "finish_reason") orelse return false;
+    return reason == .string and std.mem.eql(u8, reason.string, "error");
+}
+
+/// Codes are either OpenAI-style strings or HTTP statuses. Client errors other
+/// than timeouts and rate limits fail the same way when retried.
+fn failure_cause(code: ?[]const u8) ?types.ProviderFailureCause {
+    const text = code orelse return null;
+    if (std.mem.eql(u8, text, "rate_limit_exceeded")) return .rate_limited;
+    const status = std.fmt.parseInt(u16, text, 10) catch return null;
+    return switch (status) {
+        408 => null,
+        429 => .rate_limited,
+        400...407, 409...428, 430...499 => .non_retryable,
+        else => null,
+    };
+}
 
 fn object(value: std.json.Value) Error!std.json.ObjectMap {
     return if (value == .object) value.object else error.InvalidChunk;
@@ -2227,12 +2287,72 @@ test "chat completions terminal evidence and finish reasons are strict" {
     }
 }
 
+test "chat completions provider errors end the stream with their code and message" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { chunk: []const u8, detail: []const u8, cause: ?types.ProviderFailureCause = null }{
+        // OpenRouter's mid-stream shape: the error object and finish_reason "error" in one chunk.
+        .{ .chunk = "{\"id\":\"chat-1\",\"provider\":\"openai\",\"error\":{\"code\":\"server_error\",\"message\":\"Provider disconnected unexpectedly\"},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}", .detail = "server_error: Provider disconnected unexpectedly" },
+        .{ .chunk = "{\"error\":{\"code\":502,\"message\":\"Upstream failed\"}}", .detail = "502: Upstream failed" },
+        .{ .chunk = "{\"error\":{\"code\":429,\"message\":\"Slow down\"}}", .detail = "429: Slow down", .cause = .rate_limited },
+        .{ .chunk = "{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Slow down\"}}", .detail = "rate_limit_exceeded: Slow down", .cause = .rate_limited },
+        .{ .chunk = "{\"error\":{\"code\":402,\"message\":\"Insufficient credits\"}}", .detail = "402: Insufficient credits", .cause = .non_retryable },
+        .{ .chunk = "{\"error\":{\"code\":408,\"message\":\"Timed out\"}}", .detail = "408: Timed out" },
+        .{ .chunk = "{\"error\":{\"message\":\"bad request\"}}", .detail = "provider_error: bad request" },
+        .{ .chunk = "{\"error\":\"opaque\"}", .detail = "provider_error: Provider response failed" },
+        .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"error\"}]}", .detail = "provider_error: Provider response failed" },
+    };
+    for (cases) |case| {
+        var reducer = try Reducer.init(alloc, test_tool_request(), .{});
+        defer reducer.deinit();
+        try test_accept(&reducer, test_text);
+        try test_accept(&reducer, test_call);
+        try test_accept(&reducer, case.chunk);
+        var result = try reducer.finish(false);
+        defer result.deinit(alloc);
+        const completion = result.completed.completion;
+        try std.testing.expectEqual(types.ProviderFinishReason.provider_error, completion.finish_reason.?);
+        try std.testing.expectEqual(types.ProviderCompletionDisposition.provider_failure, types.classifyProviderCompletion(completion));
+        try std.testing.expectEqualStrings(case.detail, completion.provider_failure_detail.?);
+        try std.testing.expectEqual(case.cause, completion.provider_failure_cause);
+        try std.testing.expectEqualStrings("chat-1", completion.generation_id.?);
+        // Partial output was already streamed for display; a failed turn never executes calls.
+        try std.testing.expect(completion.content == null);
+        try std.testing.expectEqual(@as(usize, 0), completion.tool_calls.len);
+    }
+}
+
+test "chat completions consume_stream stops at a provider error without [DONE]" {
+    const alloc = std.testing.allocator;
+    var source = std.Io.Reader.fixed(
+        "data: {\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" ++
+            "data: {\"id\":\"chat-1\",\"error\":{\"code\":\"server_error\",\"message\":\"Provider disconnected\"},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}\n\n",
+    );
+    var cancel = std.atomic.Value(bool).init(false);
+    var result = try consume_stream(alloc, &source, test_request(), .{}, null, &cancel);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(types.ProviderFinishReason.provider_error, result.completed.completion.finish_reason.?);
+    try std.testing.expectEqualStrings("server_error: Provider disconnected", result.completed.completion.provider_failure_detail.?);
+}
+
+test "chat completions provider error results release allocations on failure" {
+    const Probe = struct {
+        fn run(alloc: Allocator) !void {
+            var reducer = try Reducer.init(alloc, test_request(), .{});
+            defer reducer.deinit();
+            try test_accept(&reducer, test_text);
+            try test_accept(&reducer, "{\"error\":{\"code\":502,\"message\":\"Upstream failed\"}}");
+            var result = try reducer.finish(false);
+            result.deinit(alloc);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Probe.run, .{});
+}
+
 test "chat completions rejects malformed chunks contradictory identities and extra choices" {
     const alloc = std.testing.allocator;
     const cases = [_]struct { first: ?[]const u8 = null, chunk: []const u8, failure: Error }{
         .{ .chunk = "not JSON", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[],\"choices\":[]}", .failure = error.InvalidChunk },
-        .{ .chunk = "{\"error\":{\"message\":\"bad request\"}}", .failure = error.ProviderError },
         .{ .chunk = "{\"choices\":[{\"index\":1,\"delta\":{}}]}", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{}},{\"index\":1,\"delta\":{}}]}", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"unknown\"}]}", .failure = error.InvalidFinishReason },
@@ -2516,7 +2636,11 @@ test "chat completions usage conflicts late errors and post terminal data cannot
         var reducer = try Reducer.init(alloc, test_request(), .{});
         defer reducer.deinit();
         try test_accept(&reducer, test_stop);
-        try std.testing.expectError(error.ProviderError, reducer.accept("{\"error\":{\"message\":\"late error\"}}", false));
+        try test_accept(&reducer, "{\"error\":{\"message\":\"late error\"}}");
+        var result = try reducer.finish(false);
+        defer result.deinit(alloc);
+        try std.testing.expectEqual(types.ProviderFinishReason.provider_error, result.completed.completion.finish_reason.?);
+        try std.testing.expectEqualStrings("provider_error: late error", result.completed.completion.provider_failure_detail.?);
     }
     {
         var reducer = try Reducer.init(alloc, test_request(), .{});

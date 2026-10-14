@@ -19,6 +19,16 @@ export function toolCompletion(model: string, name: string, args: unknown, callI
   return new Response(chunks.map(value => `data: ${JSON.stringify(value)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
 }
 
+// OpenRouter reports a failure after the 200 status as an error object with
+// finish_reason "error", and may close the stream without [DONE].
+export function streamError(model: string, code: string | number, message: string, text = "") {
+  const chunks = [
+    ...(text ? [{ id: "chat-error", model, choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] }] : []),
+    { id: "chat-error", model, provider: "upstream", error: { code, message }, choices: [{ index: 0, delta: { content: "" }, finish_reason: "error" }] },
+  ];
+  return new Response(chunks.map(value => `data: ${JSON.stringify(value)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+}
+
 export function createConfiguredProviderFixture(respond?: (body: any) => Response | Promise<Response>) {
   const home = realpathSync(createIsolatedTestHome());
   const workspace = join(home, "workspace");

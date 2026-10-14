@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FX_BIN, runFx } from "../evals/eval-helpers";
-import { completion, toolCompletion, createConfiguredProviderFixture as fixture } from "./fixtures/chat-completions";
+import { completion, streamError, toolCompletion, createConfiguredProviderFixture as fixture } from "./fixtures/chat-completions";
 
 async function withReasoning(response: Response, ...deltas: Record<string, unknown>[]) {
   const prefix = deltas.map(delta => `data: ${JSON.stringify({ choices: [{ index: 0, delta }] })}\n\n`).join("");
@@ -142,6 +142,29 @@ describe("configured providers", () => {
       expect(f.requests).toHaveLength(1);
     } finally { f.close(); }
   });
+
+  test("a mid-stream provider error stops without retry and reports its code and message", async () => {
+    const f = fixture(body => streamError(body.model, 402, "Insufficient credits", "partial "));
+    try {
+      const result = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
+      expect(result.code).not.toBe(0);
+      expect(JSON.parse(result.stdout).error).toBe("ModelError");
+      expect(result.stderr).toContain("402: Insufficient credits");
+      expect(f.requests).toHaveLength(1);
+    } finally { f.close(); }
+  }, 25000);
+
+  test("a retryable mid-stream provider error before any output is retried", async () => {
+    let calls = 0;
+    const f = fixture(body => ++calls === 1 ? streamError(body.model, "server_error", "Provider disconnected unexpectedly") : completion(body.model));
+    try {
+      const result = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      expect(JSON.parse(result.stdout).output).toBe("local reply");
+      expect(result.stderr).toContain("server_error: Provider disconnected unexpectedly");
+      expect(f.requests).toHaveLength(2);
+    } finally { f.close(); }
+  }, 25000);
 
   test("CLI selection persists a configured name and uses only its credential", async () => {
     const f = fixture();
