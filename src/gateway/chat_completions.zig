@@ -65,7 +65,16 @@ pub fn build_for(definition: *const definitions.Definition, alloc: Allocator, re
             break;
         }
     };
-    return codec.build_request(alloc, request, .{
+    var sent = request;
+    // The side model always reasons, and its default effort can spend a
+    // title's small output budget before any text. Titles are the side calls
+    // without tools. Reviews keep the default: at minimal effort the model
+    // flagged harmless commands. Agent turns on the same model keep it too.
+    const title_call = sent.tool_choice == .none;
+    if (definition.builtin == .openrouter and title_call and sent.provider_options.reasoning == null and std.mem.eql(u8, sent.model, openrouter.side_model)) {
+        sent.provider_options.reasoning = openrouter.side_model_effort;
+    }
+    return codec.build_request(alloc, sent, .{
         .tool_choice_mode = definition.tool_choice_mode,
         .dialect = if (definition.builtin == .openrouter) .openrouter else .standard,
         .provider = &identity,
@@ -257,6 +266,23 @@ test "the OpenRouter definition carries its built-in identity and replay binding
     const body = try build_for(&openrouter.definition, std.testing.allocator, .{ .model = "anthropic/claude-sonnet-5.5", .messages = &messages, .tools = .{}, .tool_choice = .auto, .provider_options = .{} });
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.find(u8, body, "\"reasoning\":\"kept\"") != null);
+}
+
+test "OpenRouter titles ask the side model for minimal reasoning" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "title this" }};
+    const title = try build_for(&openrouter.definition, alloc, .{ .model = openrouter.side_model, .messages = &messages, .tool_choice = .none, .provider_options = .{}, .max_output_tokens = 128 });
+    defer alloc.free(title);
+    try std.testing.expect(std.mem.find(u8, title, "\"reasoning\":{\"effort\":\"minimal\"}") != null);
+    for ([_]streams.RequestData{
+        .{ .model = "anthropic/claude-sonnet-5.5", .messages = &messages, .tool_choice = .none, .provider_options = .{} },
+        .{ .model = openrouter.side_model, .messages = &messages, .tool_choice = .auto, .provider_options = .{} },
+        .{ .model = openrouter.side_model, .messages = &messages, .tools = .{ .additional_functions = &.{classifier.function_schema} }, .tool_choice = .required, .provider_options = .{} },
+    }) |request| {
+        const turn = try build_for(&openrouter.definition, alloc, request);
+        defer alloc.free(turn);
+        try std.testing.expect(std.mem.find(u8, turn, "\"reasoning\"") == null);
+    }
 }
 
 test "chat completions failure kinds classify credits and timeouts" {

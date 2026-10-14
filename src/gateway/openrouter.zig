@@ -3,12 +3,15 @@
 const std = @import("std");
 const definitions = @import("../core/config/configured_provider.zig");
 const endpoints = @import("../core/config/openrouter_endpoints.zig");
+const types = @import("../core/shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 
 /// A cheap, tool-capable model for session titles and permission reviews, so
 /// those side calls never bill the user's chosen model. Revisit each release.
 pub const side_model = "openai/gpt-5-nano";
+/// The side model rejects "none", so titles ask for the least reasoning it allows.
+pub const side_model_effort: types.ReasoningEffort = .literal("minimal");
 
 /// The fixed connection the chat completions bundle borrows for the process lifetime.
 pub const definition = definitions.Definition{
