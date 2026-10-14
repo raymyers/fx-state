@@ -25,6 +25,33 @@ pub const definition = definitions.Definition{
 /// Replaces the body of a 402, which only says the key lacks credits.
 pub const credits_exhausted_message = "OpenRouter credits exhausted. Add credits at https://openrouter.ai/credits, then try again.";
 
+/// Replaces the body of a 503 when fx restricted routing, since the cause is
+/// likely the user's own provider_order. Caller owns the message.
+pub fn routingUnavailableMessage(alloc: Allocator, order: []const []const u8, strict: bool) Allocator.Error![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    out.writer.writeAll("OpenRouter has no available provider for this model among provider_order (") catch return error.OutOfMemory;
+    for (order, 0..) |slug, index| {
+        if (index != 0) out.writer.writeAll(", ") catch return error.OutOfMemory;
+        out.writer.writeAll(slug) catch return error.OutOfMemory;
+    }
+    out.writer.writeAll(if (strict)
+        "), and provider_strict stops it from trying others. Change provider_order or turn off provider_strict."
+    else
+        "). Change provider_order.") catch return error.OutOfMemory;
+    return out.toOwnedSlice();
+}
+
+test "OpenRouter names the routing settings behind a 503" {
+    const alloc = std.testing.allocator;
+    const strict = try routingUnavailableMessage(alloc, &.{ "anthropic", "google-vertex" }, true);
+    defer alloc.free(strict);
+    try std.testing.expectEqualStrings("OpenRouter has no available provider for this model among provider_order (anthropic, google-vertex), and provider_strict stops it from trying others. Change provider_order or turn off provider_strict.", strict);
+    const loose = try routingUnavailableMessage(alloc, &.{"anthropic"}, false);
+    defer alloc.free(loose);
+    try std.testing.expectEqualStrings("OpenRouter has no available provider for this model among provider_order (anthropic). Change provider_order.", loose);
+}
+
 /// App attribution OpenRouter shows in its rankings and the user's activity page.
 pub const attribution_headers = [_]std.http.Header{
     .{ .name = "HTTP-Referer", .value = "https://fx.sh" },

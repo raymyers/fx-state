@@ -171,7 +171,7 @@ fn validate_dynamic_schema(value: std.json.Value, depth: usize, budget: *SchemaB
 fn validate_request(request: stream_provider.RequestData) Error!void {
     try request.validatePrompt();
     configured_provider.validate_model_id(request.model) catch return error.InvalidModel;
-    if (request.provider_options.fast or request.provider_options.provider_order.len != 0) return error.UnsupportedProviderOption;
+    if (request.provider_options.fast) return error.UnsupportedProviderOption;
     if (request.response_format != null) return error.UnsupportedResponseFormat;
     // The vision tool runs through a separate provider request; inline image
     // content on user and tool-result messages serializes natively below.
@@ -399,7 +399,7 @@ fn write_replay(writer: *std.Io.Writer, alloc: Allocator, message: types.ChatMes
 /// Deadline enforcement and prepared-body reuse belong to the transport owner.
 pub fn build_request(alloc: Allocator, input: stream_provider.RequestData, options: Options) Error![]u8 {
     try validate_request(input);
-    if (options.dialect == .standard and (input.provider_options.reasoning != null or input.provider_options.prompt_caching)) return error.UnsupportedProviderOption;
+    if (options.dialect == .standard and (input.provider_options.reasoning != null or input.provider_options.prompt_caching or input.provider_options.provider_order.len != 0)) return error.UnsupportedProviderOption;
     var projected: ?[]types.ChatMessage = null;
     if (options.provider) |provider| {
         projected = try types.projectProviderReplay(alloc, input.messages, .{ .provider = provider.*, .model = input.model });
@@ -622,6 +622,13 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
     }
     if (request.max_output_tokens) |limit| try writer.print(",\"max_tokens\":{d}", .{limit});
     if (options.dialect == .openrouter) {
+        // provider_strict forbids OpenRouter from routing past the listed providers.
+        if (request.provider_options.provider_order.len != 0) {
+            try writer.writeAll(",\"provider\":{\"order\":");
+            try std.json.Stringify.value(request.provider_options.provider_order, .{}, writer);
+            if (request.provider_options.provider_strict) try writer.writeAll(",\"allow_fallbacks\":false");
+            try writer.writeByte('}');
+        }
         if (request.provider_options.reasoning) |effort| {
             try writer.writeAll(",\"reasoning\":{\"effort\":");
             try std.json.Stringify.value(effort.label(), .{}, writer);
@@ -2526,7 +2533,17 @@ test "chat completions OpenRouter dialect sends reasoning effort and cache break
     const plain = try build_request(alloc, request, .{ .dialect = .openrouter });
     defer alloc.free(plain);
     try std.testing.expect(std.mem.find(u8, plain, "cache_control") == null and std.mem.find(u8, plain, "\"reasoning\"") == null);
-    for ([_]model_capabilities.ResolvedProviderOptions{ .{ .reasoning = .literal("high") }, .{ .prompt_caching = true } }) |options| {
+    const order = [_][]const u8{ "anthropic", "google-vertex" };
+    for ([_]bool{ false, true }) |strict| {
+        request.provider_options = .{ .provider_order = &order, .provider_strict = strict };
+        const routed = try build_request(alloc, request, .{ .dialect = .openrouter });
+        defer alloc.free(routed);
+        try std.testing.expect(std.mem.endsWith(u8, routed, if (strict)
+            ",\"provider\":{\"order\":[\"anthropic\",\"google-vertex\"],\"allow_fallbacks\":false}}"
+        else
+            ",\"provider\":{\"order\":[\"anthropic\",\"google-vertex\"]}}"));
+    }
+    for ([_]model_capabilities.ResolvedProviderOptions{ .{ .reasoning = .literal("high") }, .{ .prompt_caching = true }, .{ .provider_order = &order } }) |options| {
         request.provider_options = options;
         try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     }

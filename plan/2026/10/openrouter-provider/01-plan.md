@@ -160,9 +160,9 @@ Tasks:
 - [x] Write per-turn `cost`, cached tokens, and reasoning tokens to the durable usage ledger.
   - The per-turn usage saved in each session checkpoint now sums `cost`, and `fx ask --json` reports it.
 - [x] `src/usage/openrouter.zig` and a `usage.zig` scope: read `GET /api/v1/key` and show usage, limit, and remaining credits. Add text and JSON rendering in `output_contracts.zig` from one snapshot.
-- [ ] 402 message with the credits link. 503 message that names the routing constraint, if one was set.
-  - Done: the 402 message, linking https://openrouter.ai/credits as OpenRouter's error docs do. Open: the 503 message, which depends on open question 2 because fx sends no routing constraints yet.
-- [ ] Map `provider_order` and `provider_strict` to `provider.order` and `allow_fallbacks`, if spec open question 2 is accepted.
+- [x] 402 message with the credits link. 503 message that names the routing constraint, if one was set.
+  - The 402 message links https://openrouter.ai/credits, as OpenRouter's error docs do. A 503 under `provider_order` names the order, and under `provider_strict` it is not retried, since a retry would fail the same way.
+- [x] Map `provider_order` and `provider_strict` to `provider.order` and `allow_fallbacks`, if spec open question 2 is accepted. (The maintainers accepted it. The slugs pass through unchanged, so they must be OpenRouter provider slugs.)
 
 Deliverables and tests:
 

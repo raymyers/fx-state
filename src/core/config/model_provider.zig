@@ -64,6 +64,12 @@ pub const ProviderId = union(enum) {
         return bound;
     }
 
+    /// Gateway and OpenRouter both route a model among upstream providers, so
+    /// `provider_order` and `provider_strict` apply to them alone.
+    pub fn routesByProviderOrder(self: ProviderId) bool {
+        return self == .gateway or self == .openrouter;
+    }
+
     pub fn same_authority(self: ProviderId, other: ProviderId) bool {
         if (!self.eql(other)) return false;
         if (self != .configured) return true;

@@ -40,6 +40,11 @@ async function login(f: Fixture, args: string[], visit: (url: string) => Promise
   return { code: await closed, stdout, stderr, url: new URL(url) };
 }
 
+// Chat requests for agent turns, without the side call that titles a new session.
+function turnRequests(f: Fixture) {
+  return f.requests.filter((request) => request.path === "/api/v1/chat/completions" && !JSON.stringify(request.body.messages).includes("Generate a short title"));
+}
+
 function savedKey(f: Fixture): string | undefined {
   const path = join(f.home, ".fx", "openrouter-auth.json");
   return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")).api_key : undefined;
@@ -124,7 +129,7 @@ describe("openrouter provider", () => {
       f.save();
       const resumed = await runFx(["ask", "--json", "--resume", session, "what was the word?"], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
       if (resumed.code !== 0) throw new Error(resumed.stdout + resumed.stderr);
-      const chats = f.requests.filter((request) => request.path === "/api/v1/chat/completions");
+      const chats = turnRequests(f);
       expect(chats).toHaveLength(2);
       expect(chats[1].authorization).toBe("Bearer sk-or-test-key");
       expect(JSON.stringify(chats[1].body.messages)).toContain("remember the word lantern");
@@ -272,7 +277,7 @@ describe("openrouter provider", () => {
         if (result.code !== 0) throw new Error(result.stdout + result.stderr);
         id = JSON.parse(result.stdout).session_id;
       }
-      const chats = f.requests.filter((request) => request.path === "/api/v1/chat/completions");
+      const chats = turnRequests(f);
       expect(chats.some((request) => JSON.stringify(request.body.messages).includes("<compacted_conversation>"))).toBe(true);
       expect(chats.every((request) => request.body.model === "tiny/model" && request.body.max_tokens > 0 && request.body.max_tokens <= 512)).toBe(true);
     } finally { f.close(); }
@@ -353,6 +358,28 @@ describe("openrouter provider", () => {
       expect(chats.filter((request) => request !== review && request !== title).every((request) => request.body.model === "anthropic/claude-sonnet-5.5")).toBe(true);
       const sessions = await runFx(["sessions", "--json"], { cwd: f.workspace, env: f.env });
       expect(sessions.stdout).toContain("Fixture Session Title");
+    } finally { f.close(); }
+  }, 45000);
+
+  test("provider_order and provider_strict route OpenRouter and explain a 503", async () => {
+    let unavailable = false;
+    const f = fixture((body) => unavailable
+      ? Response.json({ error: { code: 503, message: "No endpoints found matching your data policy" } }, { status: 503 })
+      : openRouterCompletion(body.model));
+    try {
+      const env = { ...f.env, FX_PROVIDER: "openrouter" };
+      const routed = await runFx(["ask", "--json", "--no-save", "--provider-order", "anthropic,google-vertex", "--provider-strict", "say hello"], { cwd: f.workspace, env, timeoutMs: 20000 });
+      if (routed.code !== 0) throw new Error(routed.stdout + routed.stderr);
+      expect(f.requests.at(-1)!.body.provider).toEqual({ order: ["anthropic", "google-vertex"], allow_fallbacks: false });
+      const open = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env, timeoutMs: 20000 });
+      if (open.code !== 0) throw new Error(open.stdout + open.stderr);
+      expect(f.requests.at(-1)!.body.provider).toBeUndefined();
+      unavailable = true;
+      const failed = await runFx(["ask", "--json", "--no-save", "--provider-order", "anthropic", "--provider-strict", "say hello"], { cwd: f.workspace, env, timeoutMs: 20000 });
+      expect(failed.code).not.toBe(0);
+      expect(failed.stderr).toContain("OpenRouter has no available provider for this model among provider_order (anthropic), and provider_strict stops it from trying others.");
+      // Strict routing fails the same way on a retry, so there is none.
+      expect(f.requests.filter((request) => request.path === "/api/v1/chat/completions" && request.body.provider?.allow_fallbacks === false && request.body.provider.order.length === 1)).toHaveLength(1);
     } finally { f.close(); }
   }, 45000);
 });

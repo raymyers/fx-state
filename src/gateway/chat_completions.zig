@@ -212,8 +212,17 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
             alloc.free(detail);
             detail = try alloc.dupe(u8, openrouter.credits_exhausted_message);
         }
+        var kind = failure_kind(response.head.status);
+        const options = request.data().provider_options;
+        if (definition.builtin == .openrouter and response.head.status == .service_unavailable and options.provider_order.len != 0) {
+            const routing = try openrouter.routingUnavailableMessage(alloc, options.provider_order, options.provider_strict);
+            alloc.free(detail);
+            detail = routing;
+            // Strict routing fails the same way on every retry.
+            if (options.provider_strict) kind = .provider_error;
+        }
 
-        return .{ .failed = .{ .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
+        return .{ .failed = .{ .kind = kind, .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
     return consume(alloc, reader, request);
 }

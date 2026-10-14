@@ -3086,6 +3086,8 @@ tmuxTest(
       async fetch(request) {
         if (new URL(request.url).pathname === "/api/v1/models") return openRouterCatalog();
         const body = await request.json();
+        // A new session's title is a separate side call.
+        if (JSON.stringify(body.messages).includes("Generate a short title")) return openRouterCompletion(body.model, "Fixture Title");
         requests.push({ authorization: request.headers.get("authorization"), model: body.model });
         return openRouterCompletion(body.model, "OPENROUTER_PICKER_RESPONSE");
       },
