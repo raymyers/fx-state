@@ -5,6 +5,8 @@ const auth_transition = @import("auth_transition.zig");
 const credentials = @import("credentials.zig");
 const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const grok_oauth = @import("grok_oauth.zig");
+const openrouter_oauth = @import("openrouter_oauth.zig");
+const openrouter_session = @import("openrouter_session.zig");
 const host = @import("../hosts/host.zig");
 const host_target = @import("../hosts/target.zig");
 const login_flow = @import("login_flow.zig");
@@ -570,11 +572,17 @@ pub const ApiKeySaveOutcome = union(enum) {
     }
 };
 
+/// Which provider a typed key belongs to. The inline `/provider` picker sets
+/// it; the staged hub always enters a Gateway key.
+pub const ApiKeyTarget = enum { gateway, openrouter };
+
 const ApiKeySaveDeps = struct {
     ctx: ?*anyopaque = null,
     validator: api_key_validator.Provider = api_key_validator.unavailable_provider,
     store: StoredKeyStoreFn = storeUnavailableSecret,
     loader: CredentialLoaderFn = loadCredentialSource,
+    /// The source the stored key reloads as.
+    source: credentials.Source = .stored_key,
 };
 
 /// The whole save sequence with no runtime state, so outcome behaviour can be
@@ -589,12 +597,12 @@ fn performApiKeySave(alloc: Allocator, key: []const u8, deps: ApiKeySaveDeps) Ap
         debug_trace.logf("auth", "api key save failed step=store err={s}", .{@errorName(err)});
         return .store_failed;
     };
-    const loaded = deps.loader(deps.ctx, alloc, .stored_key) catch |err| {
+    const loaded = deps.loader(deps.ctx, alloc, deps.source) catch |err| {
         debug_trace.logf("auth", "api key save failed step=reload err={s}", .{@errorName(err)});
         return .reload_failed;
     };
     const credential = loaded orelse return .reload_failed;
-    if (credential.source != .stored_key) {
+    if (credential.source != deps.source) {
         var wrong = credential;
         wrong.deinit(alloc);
         return .reload_failed;
@@ -1775,6 +1783,9 @@ pub const Runtime = struct {
     /// panel, so the composer keeps showing which path the user walked.
     api_key_inline: bool = false,
     api_key_returns_to_root: bool = false,
+    api_key_target: ApiKeyTarget = .gateway,
+    /// The target of the save in flight or last finished.
+    api_key_save_target: ApiKeyTarget = .gateway,
     api_key_save: ApiKeySaveRuntime = .{},
     inventory_refresh_task: ?*InventoryRefreshTask = null,
     prompt_credential_refresh_task: ?*PromptCredentialRefreshTask = null,
@@ -1824,7 +1835,7 @@ pub const Runtime = struct {
         auth_mode: credentials.AuthMode,
     ) void {
         comptime {
-            if (@typeInfo(Self).@"struct".field_names.len != 33) {
+            if (@typeInfo(Self).@"struct".field_names.len != 35) {
                 @compileError("update Runtime.initInto for the changed field set");
             }
         }
@@ -1856,6 +1867,8 @@ pub const Runtime = struct {
         storage.api_key_input = .empty;
         storage.api_key_inline = false;
         storage.api_key_returns_to_root = false;
+        storage.api_key_target = .gateway;
+        storage.api_key_save_target = .gateway;
         storage.api_key_save = .{};
         storage.inventory_refresh_task = null;
         storage.prompt_credential_refresh_task = null;
@@ -2386,14 +2399,24 @@ pub const Runtime = struct {
         self.picker_stage = .api_key;
         self.picker_selection = null;
         self.api_key_returns_to_root = returns_to_root;
+        self.api_key_target = .gateway;
     }
 
     /// Opens the key field for the inline `/provider` picker. The stage is the
     /// same one the staged panel uses, so entry, saving, and cancelling all
     /// keep working; only the rendering differs.
     pub fn openApiKeyPickerInline(self: *Self, alloc: Allocator) void {
+        self.openApiKeyPickerInlineFor(alloc, .gateway);
+    }
+
+    pub fn openApiKeyPickerInlineFor(self: *Self, alloc: Allocator, target: ApiKeyTarget) void {
         self.openApiKeyPickerWithParent(alloc, false);
         self.api_key_inline = true;
+        self.api_key_target = target;
+    }
+
+    pub fn apiKeySaveTarget(self: *const Self) ApiKeyTarget {
+        return self.api_key_save_target;
     }
 
     pub fn apiKeyInlineActive(self: *const Self) bool {
@@ -2435,6 +2458,11 @@ pub const Runtime = struct {
         return self.openSignInPickerWithParent(alloc, true, .grok_subscription);
     }
 
+    pub fn openOpenRouterSignInPickerFromRoot(self: *Self, alloc: Allocator) !bool {
+        if (comptime host_target.is_wasm) return error.OpenRouterSignInUnavailable;
+        return self.openSignInPickerWithParent(alloc, false, .openrouter_login);
+    }
+
     pub fn openGrokSignInPickerForProviderSwitch(self: *Self, alloc: Allocator) !bool {
         if (comptime host_target.is_wasm) return error.GrokOAuthUnavailable;
         return self.openSignInPickerWithParent(alloc, false, .grok_subscription);
@@ -2451,6 +2479,7 @@ pub const Runtime = struct {
             .fx_login => try self.sign_in_flow.start(alloc, self.oauth_transport),
             .chatgpt_subscription => try chatgpt_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport),
             .grok_subscription => try grok_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport),
+            .openrouter_login => try openrouter_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport, .browser),
             else => return error.InvalidSignInSource,
         };
         if (!started) return false;
@@ -2566,12 +2595,23 @@ pub const Runtime = struct {
     /// store write can block for seconds on a locked keychain, and the gateway
     /// check is a network round trip; neither may run on the event loop.
     pub fn beginApiKeySave(self: *Self, alloc: Allocator) ApiKeySaveStart {
-        return self.beginApiKeySaveWithDeps(alloc, .{
-            .ctx = self,
-            .validator = self.api_key_validator,
-            .store = storeRuntimeSecret,
-            .loader = loadRuntimeCredentialSource,
-        });
+        const target = self.api_key_target;
+        if (self.apiKeyEntryActive() and self.api_key_input.items.len > 0 and !self.api_key_save.isSaving()) self.api_key_save_target = target;
+        return switch (target) {
+            .gateway => self.beginApiKeySaveWithDeps(alloc, .{
+                .ctx = self,
+                .validator = self.api_key_validator,
+                .store = storeRuntimeSecret,
+                .loader = loadRuntimeCredentialSource,
+            }),
+            .openrouter => self.beginApiKeySaveWithDeps(alloc, .{
+                .ctx = self,
+                .validator = .{ .context = self, .validate_fn = validateOpenRouterKey },
+                .store = storeOpenRouterKey,
+                .loader = loadRuntimeCredentialSource,
+                .source = .openrouter_login,
+            }),
+        };
     }
 
     fn beginApiKeySaveWithDeps(self: *Self, alloc: Allocator, deps: ApiKeySaveDeps) ApiKeySaveStart {
@@ -2612,6 +2652,9 @@ pub const Runtime = struct {
                 var owned = credential.*;
                 outcome = .reload_failed;
                 defer owned.deinit(alloc);
+                // An OpenRouter key cannot authorize the current provider; the
+                // caller switches to OpenRouter, which loads it again.
+                if (self.api_key_save_target == .openrouter) break :blk .{ .saved = false };
                 break :blk .{ .saved = self.adoptCredential(alloc, &owned) };
             },
         };
@@ -3208,6 +3251,19 @@ fn loadRuntimeCredentialSource(raw: ?*anyopaque, alloc: Allocator, source: crede
 fn storeRuntimeSecret(raw: ?*anyopaque, alloc: Allocator, value: []const u8) !void {
     const self: *Runtime = @ptrCast(@alignCast(raw.?));
     return self.secret_store.store(alloc, value);
+}
+
+fn validateOpenRouterKey(raw: ?*anyopaque, alloc: Allocator, key: []const u8) api_key_validator.Result {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    openrouter_oauth.validateKey(alloc, self.oauth_transport, key) catch |err| return switch (err) {
+        error.OpenRouterKeyRejected, error.InvalidOpenRouterKey => .refused,
+        else => .unavailable,
+    };
+    return .accepted;
+}
+
+fn storeOpenRouterKey(_: ?*anyopaque, alloc: Allocator, key: []const u8) !void {
+    try openrouter_session.save(alloc, key);
 }
 
 fn storeUnavailableSecret(_: ?*anyopaque, _: Allocator, _: []const u8) !void {

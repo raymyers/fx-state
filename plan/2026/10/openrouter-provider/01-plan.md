@@ -94,7 +94,7 @@ Tasks:
 - [x] `--api-key`: hidden key entry.
 - [x] Validate every new key with `GET /api/v1/key` before storing it.
 - [x] `fx login openrouter` and `fx logout openrouter` in `cli_surface.zig`. Logout deletes the stored key and says that the key remains active on OpenRouter until it is deleted in OpenRouter's key settings.
-- [ ] TUI: add the OpenRouter `/login` picker row with "Sign in with browser" and "Paste API key", and `/logout openrouter`, in `auth_runtime.zig` and `app_auth_runtime.zig`.
+- [x] TUI: add the OpenRouter `/login` picker row with "Sign in with browser" and "Paste API key", and `/logout openrouter`, in `auth_runtime.zig` and `app_auth_runtime.zig`.
 - [x] ACP: tell an ACP client with no OpenRouter credential how to sign in.
 - [x] `commands.zig`: `fx login` and `fx logout` usage text, including `--headless` and `--api-key`.
 - [x] Test seam: `FX_E2E_OPENROUTER_AUTH_URL` (loopback only) and an injectable browser opener.

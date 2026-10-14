@@ -454,7 +454,7 @@ fn authPickerInteractionHint(view: auth_runtime.PickerView, width: u16) ?[]const
         .change_team => team_variants,
         .sign_in => switch (view.sign_in_source) {
             .chatgpt_subscription => codex_sign_in_variants,
-            .grok_subscription => if (view.sign_in_code_visible)
+            .grok_subscription, .openrouter_login => if (view.sign_in_code_visible)
                 grok_manual_variants
             else
                 grok_browser_variants,

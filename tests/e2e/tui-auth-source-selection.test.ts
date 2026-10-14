@@ -21,6 +21,7 @@ import { fakeResponsesTitleDefault, TITLE_GENERATION_MARKER } from "./tmux-helpe
 import { readTapeFrames } from "./render-lab/tape";
 import { equivalentPngEncodings, solidPng } from "./fixtures/image-encoding";
 import { openRouterCompletion } from "./fixtures/chat-completions";
+import { createOpenRouterFixture } from "./fixtures/openrouter";
 import {
   FAKE_GATEWAY_MODEL,
   fakeGatewayFinalText,
@@ -3109,6 +3110,85 @@ tmuxTest(
     }
   },
   60_000,
+);
+
+tmuxTest(
+  "the /login picker signs in to OpenRouter with the browser and /logout removes the key",
+  async () => {
+    const f = createOpenRouterFixture();
+    stderrPath = join(f.home, "stderr.log");
+    gateway = startFakeGateway();
+    try {
+      session = await startFx(f.home, stderrPath, gateway, undefined, undefined, {
+        FX_MODEL: undefined,
+        FX_E2E_OPENROUTER_BASE_URL: f.env.FX_E2E_OPENROUTER_BASE_URL,
+        FX_E2E_OPENROUTER_AUTH_URL: f.env.FX_E2E_OPENROUTER_AUTH_URL,
+      }, f.workspace);
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("/login");
+      await session.waitForPane((pane) => pane.includes("openrouter"), TIMEOUT);
+      await session.sendText("openrouter");
+      await session.waitForPane((pane) => pane.includes("sign in with browser") && pane.includes("paste API key"), TIMEOUT);
+      await session.sendText("oauth");
+      await completeDisplayedSubscriptionLogin(session, "Authorize with OpenRouter", `${f.env.FX_E2E_OPENROUTER_AUTH_URL}?`);
+      await session.waitForText("Switched to OpenRouter with anthropic/claude-sonnet-5.5.", TIMEOUT);
+      const saved = JSON.parse(readFileSync(join(f.home, ".fx", "openrouter-auth.json"), "utf8"));
+      expect(saved.api_key).toBe("sk-or-v1-issued-1");
+      await session.sendText("Answer from OpenRouter.");
+      await session.waitForText("openrouter reply", TIMEOUT);
+      expect(f.requests.filter((request) => request.path === "/api/v1/chat/completions").at(-1)!.authorization).toBe("Bearer sk-or-v1-issued-1");
+
+      await session.sendText("/logout openrouter");
+      await session.waitForText("Signed out of OpenRouter. The key stays active on OpenRouter", TIMEOUT);
+      await session.waitForText("Switched to Vercel AI Gateway", TIMEOUT);
+      expect(existsSync(join(f.home, ".fx", "openrouter-auth.json"))).toBe(false);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      await session?.kill();
+      session = null;
+      f.close();
+    }
+  },
+  90_000,
+);
+
+tmuxTest(
+  "the /login picker saves a pasted OpenRouter key only after OpenRouter accepts it",
+  async () => {
+    const f = createOpenRouterFixture();
+    stderrPath = join(f.home, "stderr.log");
+    gateway = startFakeGateway();
+    try {
+      session = await startFx(f.home, stderrPath, gateway, undefined, undefined, {
+        FX_MODEL: undefined,
+        FX_E2E_OPENROUTER_BASE_URL: f.env.FX_E2E_OPENROUTER_BASE_URL,
+      }, f.workspace);
+      await session.waitForComposer(TIMEOUT);
+      for (const key of ["sk-or-v1-unknown", "sk-or-test-key"]) {
+        await session.sendText("/login");
+        await session.waitForPane((pane) => pane.includes("openrouter"), TIMEOUT);
+        await session.sendText("openrouter");
+        await session.waitForPane((pane) => pane.includes("paste API key"), TIMEOUT);
+        await session.sendText("api-key");
+        await session.waitForText("Paste or type a key", TIMEOUT);
+        await session.sendLiteralText(key);
+        await session.sendKeys("Enter");
+        if (key === "sk-or-v1-unknown") {
+          await session.waitForText("OpenRouter rejected that API key. Nothing was stored.", TIMEOUT);
+          expect(existsSync(join(f.home, ".fx", "openrouter-auth.json"))).toBe(false);
+        }
+      }
+      await session.waitForText("Saved the OpenRouter key.", TIMEOUT);
+      await session.waitForText("Switched to OpenRouter with anthropic/claude-sonnet-5.5.", TIMEOUT);
+      expect(JSON.parse(readFileSync(join(f.home, ".fx", "openrouter-auth.json"), "utf8")).api_key).toBe("sk-or-test-key");
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      await session?.kill();
+      session = null;
+      f.close();
+    }
+  },
+  90_000,
 );
 
 async function startFxWithoutAuth(
