@@ -816,6 +816,8 @@ pub fn handlePrompt(
                 credentials.missing_chatgpt_credential_message
             else if (session.provider == .grok)
                 credentials.missing_grok_credential_message
+            else if (session.provider == .openrouter)
+                credentials.missing_openrouter_credential_message
             else
                 credentials.missing_credential_message,
         } };

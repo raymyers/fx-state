@@ -58,7 +58,7 @@ pub fn authPickerRowCount(view: auth_runtime.PickerView) u16 {
     if (view.stage == .sign_in) {
         return switch (view.sign_in_source) {
             .chatgpt_subscription => 4,
-            .grok_subscription => if (view.sign_in_code_visible) 7 else 5,
+            .grok_subscription, .openrouter_login => if (view.sign_in_code_visible) 7 else 5,
             else => 7,
         };
     }
@@ -303,6 +303,20 @@ pub noinline fn composeAuthPickerRow(
     unreachable;
 }
 
+/// Sign-ins that wait on a browser callback and also accept a pasted code
+/// share one collapsed layout.
+fn browserCallbackSource(source: credentials.Source) bool {
+    return source == .grok_subscription or source == .openrouter_login;
+}
+
+fn signInTitle(source: credentials.Source) []const u8 {
+    return switch (source) {
+        .chatgpt_subscription => "Sign in with Codex",
+        .openrouter_login => "Sign in with OpenRouter",
+        else => "Sign in with Grok",
+    };
+}
+
 fn signInProjectedRowIndex(
     snapshot: login_flow.SignInSnapshot,
     source: credentials.Source,
@@ -315,7 +329,7 @@ fn signInProjectedRowIndex(
         return prioritizedRowIndex(4, &codex_priority, row_index, row_count);
     }
     const grok_browser_priority = [_]u16{ 2, 3, 0, 4, 1 };
-    if (source == .grok_subscription and !manual_code_visible) {
+    if (browserCallbackSource(source) and !manual_code_visible) {
         return prioritizedRowIndex(5, &grok_browser_priority, row_index, row_count);
     }
 
@@ -437,7 +451,7 @@ fn composeSignInPickerRow(
     if (width == 0) return row;
     const accepts_manual_code = snapshot.accepts_manual_code;
 
-    const subscription_source = source == .chatgpt_subscription or source == .grok_subscription;
+    const subscription_source = source == .chatgpt_subscription or browserCallbackSource(source);
     if (subscription_source and row_index == 0) {
         try row.appendSlice(alloc, ui_render.dim_style);
         const value_col = detailValueColumn(width);
@@ -455,7 +469,7 @@ fn composeSignInPickerRow(
         try row_text.appendSingleLineEllipsized(
             alloc,
             &row,
-            if (source == .chatgpt_subscription) "Sign in with Codex" else "Sign in with Grok",
+            signInTitle(source),
             value_col,
         );
         if (status_col < width) {
@@ -480,17 +494,22 @@ fn composeSignInPickerRow(
         if (remaining > 0) {
             try row.appendSlice(
                 alloc,
-                if (source == .chatgpt_subscription)
-                    "\x1b]8;id=fx-codex-auth;"
-                else
-                    "\x1b]8;id=fx-grok-auth;",
+                switch (source) {
+                    .chatgpt_subscription => "\x1b]8;id=fx-codex-auth;",
+                    .openrouter_login => "\x1b]8;id=fx-openrouter-auth;",
+                    else => "\x1b]8;id=fx-grok-auth;",
+                },
             );
             try row.appendSlice(alloc, snapshot.verification_uri);
             try row.appendSlice(alloc, "\x1b\\\x1b[4m");
             try row_text.appendClipped(
                 alloc,
                 &row,
-                if (source == .chatgpt_subscription) "Authorize with Codex" else "Authorize with Grok",
+                switch (source) {
+                    .chatgpt_subscription => "Authorize with Codex",
+                    .openrouter_login => "Authorize with OpenRouter",
+                    else => "Authorize with Grok",
+                },
                 remaining,
             );
             try row.appendSlice(alloc, "\x1b[24m\x1b]8;;\x1b\\");
@@ -499,7 +518,7 @@ fn composeSignInPickerRow(
         return row;
     }
 
-    if (source == .grok_subscription and !manual_code_visible) {
+    if (browserCallbackSource(source) and !manual_code_visible) {
         try row.appendSlice(alloc, ui_render.dim_style);
         if (row_index == 3) {
             try row_text.appendClipped(
@@ -521,12 +540,12 @@ fn composeSignInPickerRow(
         else
             ui_render.dim_style,
     );
-    if (source == .grok_subscription and manual_code_visible and row_index == 4) {
-        try row_text.appendClipped(alloc, &row, "  Paste the code shown by xAI", width);
+    if (browserCallbackSource(source) and manual_code_visible and row_index == 4) {
+        try row_text.appendClipped(alloc, &row, if (source == .openrouter_login) "  Paste the code shown by OpenRouter" else "  Paste the code shown by xAI", width);
         try row.appendSlice(alloc, ui_render.reset_style);
         return row;
     }
-    if (source == .grok_subscription and manual_code_visible and row_index == 5) {
+    if (browserCallbackSource(source) and manual_code_visible and row_index == 5) {
         const prefix = "  ┃ ";
         try row_text.appendClipped(alloc, &row, prefix, width);
         const used: u16 = @intCast(@min(display_width.visibleWidth(prefix), width));
@@ -541,7 +560,7 @@ fn composeSignInPickerRow(
         try row.appendSlice(alloc, ui_render.reset_style);
         return row;
     }
-    if (source == .grok_subscription and manual_code_visible and row_index == 6) {
+    if (browserCallbackSource(source) and manual_code_visible and row_index == 6) {
         try row.appendSlice(alloc, ui_render.reset_style);
         return row;
     }

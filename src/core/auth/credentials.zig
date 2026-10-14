@@ -4,6 +4,7 @@ const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const chatgpt_session = @import("chatgpt_session.zig");
 const grok_oauth = @import("grok_oauth.zig");
 const grok_session = @import("grok_session.zig");
+const openrouter_session = @import("openrouter_session.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
 const io_mod = @import("../shared/io.zig");
@@ -221,7 +222,8 @@ pub fn catalogAccessForCredentialAndAccount(
         .chatgpt_subscription => .chatgpt_subscription,
         .grok_subscription => .grok_subscription,
         .host_managed => unreachable,
-        .configured => return .{ .public_only = .no_credential },
+        // OpenRouter's catalog is public; its key never reaches a catalog request.
+        .openrouter_api_key, .openrouter_login, .configured => return .{ .public_only = .no_credential },
         .fx_login => blk: {
             const team = team_context orelse
                 return .{ .public_only = .fx_login_team_required };
@@ -256,6 +258,8 @@ pub const missing_chatgpt_credential_message = "fx needs a Codex subscription lo
 pub const missing_chatgpt_interactive_credential_message = "Codex needs a subscription login. Run /login, open Connections, then choose Codex subscription.";
 pub const missing_grok_credential_message = "fx needs a Grok subscription login for this model. Run fx login grok.";
 pub const missing_grok_interactive_credential_message = "Grok needs a subscription login. Run /login, open Connections, then choose Grok subscription.";
+pub const missing_openrouter_credential_message = "fx needs an OpenRouter API key for this model. Run fx login openrouter or set OPENROUTER_API_KEY; no other provider was selected.";
+pub const missing_openrouter_interactive_credential_message = "OpenRouter needs an API key. Run /login and choose OpenRouter, or set OPENROUTER_API_KEY; no other provider was selected.";
 pub const unreadable_store_message = "fx could not read the stored API key from " ++ stored_key_backend_label ++ ". A key may be saved but unreadable. Set FX_TRACE_LOG for the failing step, or set AI_GATEWAY_API_KEY.";
 pub const host_managed_auth_message = "Authentication is managed by the host.";
 
@@ -390,6 +394,7 @@ pub fn resolveForProvider(
             .bearer => |env| .{ .credential = try loadEnvCredential(alloc, env, .configured) },
         };
     }
+    if (provider == .openrouter) return resolveOpenRouter(alloc);
     if (provider != .gateway) {
         const source = provider_catalog.find(provider).login_source;
         const credential = loadPreferredSource(alloc, transport, secret_store, mode, source) catch |err| {
@@ -404,7 +409,7 @@ pub fn resolveForProvider(
         transport,
         secret_store,
         mode,
-        if (preferred == .chatgpt_subscription or preferred == .grok_subscription) null else preferred,
+        if (preferred == .chatgpt_subscription or preferred == .grok_subscription or (preferred != null and preferred.?.isOpenRouter())) null else preferred,
     );
 }
 
@@ -465,6 +470,17 @@ pub fn resolvePreferring(
     };
     if (stored) |credential| return .{ .credential = credential, .fx_login_status = fx_login_status };
     return .{ .stored_key_status = status, .fx_login_status = fx_login_status, .failure = failure };
+}
+
+/// OPENROUTER_API_KEY wins over the saved login, so a shell can override it.
+fn resolveOpenRouter(alloc: std.mem.Allocator) !Resolution {
+    if (try loadEnvCredential(alloc, "OPENROUTER_API_KEY", .openrouter_api_key)) |credential| return .{ .credential = credential };
+    const saved = loadOpenRouterLoginCredential(alloc) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        debug_trace.logf("auth", "provider source load failed source=openrouter_login err={s}", .{@errorName(err)});
+        return .{ .failure = .{ .source = .openrouter_login, .err = err } };
+    };
+    return .{ .credential = saved };
 }
 
 fn missingExplicitResolution(source: Source) Resolution {
@@ -536,6 +552,8 @@ pub fn loadSource(
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
         .chatgpt_subscription => loadChatGptCredential(alloc, transport, .if_needed),
         .grok_subscription => loadGrokCredential(alloc, transport, .if_needed),
+        .openrouter_api_key => loadEnvCredential(alloc, "OPENROUTER_API_KEY", source),
+        .openrouter_login => loadOpenRouterLoginCredential(alloc),
         .host_managed, .configured => null,
     };
 }
@@ -574,6 +592,18 @@ pub fn sourceExists(
                 debug_trace.logf("auth", "source probe failed source=grok err={s}", .{@errorName(err)});
                 break :blk false;
             },
+        },
+        .openrouter_api_key => nonEmptyEnvValue("OPENROUTER_API_KEY") != null,
+        .openrouter_login => blk: {
+            const key = openrouter_session.load(alloc) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    debug_trace.logf("auth", "source probe failed source=openrouter_login err={s}", .{@errorName(err)});
+                    break :blk false;
+                },
+            };
+            defer if (key) |value| secret.zeroAndFree(alloc, value);
+            break :blk key != null;
         },
         .stored_key => blk: {
             if (secret_store.isDisabled()) break :blk false;
@@ -614,6 +644,11 @@ pub fn sourcePresence(
             secret_store.presence(),
         .chatgpt_subscription => chatgpt_session.presence(),
         .grok_subscription => grok_session.presence(),
+        .openrouter_api_key => if (nonEmptyEnvValue("OPENROUTER_API_KEY") != null)
+            .present
+        else
+            .missing,
+        .openrouter_login => openrouter_session.presence(),
         .host_managed, .configured => .missing,
     };
 }
@@ -632,6 +667,7 @@ pub fn requireSignInStorage(source: Source) error{CredentialStorageUnavailable}!
         .fx_login => try oauth_session.requireSignInStorage(),
         .chatgpt_subscription => try chatgpt_session.requireSignInStorage(),
         .grok_subscription => try grok_session.requireSignInStorage(),
+        .openrouter_login => try openrouter_session.requireSignInStorage(),
         else => {},
     }
 }
@@ -675,6 +711,11 @@ fn loadChatGptCredential(
         .account_id = account_id,
         .refresh_after_ms = access.refresh_after_ms,
     };
+}
+
+fn loadOpenRouterLoginCredential(alloc: std.mem.Allocator) !?Credential {
+    const key = (try openrouter_session.load(alloc)) orelse return null;
+    return .{ .token = key, .source = .openrouter_login };
 }
 
 fn loadStoredChatGptCredential(alloc: std.mem.Allocator) !?Credential {
@@ -912,6 +953,8 @@ pub fn sourceLabel(source: Source) []const u8 {
         .stored_key => "stored API key (" ++ stored_key_backend_label ++ ")",
         .chatgpt_subscription => "Codex subscription",
         .grok_subscription => "Grok subscription",
+        .openrouter_api_key => "OPENROUTER_API_KEY",
+        .openrouter_login => "OpenRouter login",
         .host_managed => "host managed",
         .configured => "configured provider",
     };
@@ -1353,6 +1396,53 @@ test "stored key existence never loads secret bytes" {
     try std.testing.expectEqual(@as(usize, 1), store_fixture.presence_calls);
 }
 
+test "OpenRouter resolves the environment key before the saved login" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), ".fx");
+    var file = try tmp.dir.createFile(io_mod.getIo(), ".fx/" ++ profile_paths.openrouter_auth_file_name, .{
+        .truncate = true,
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+    });
+    try file.writeStreamingAll(io_mod.getIo(), "{\"version\":1,\"api_key\":\"sk-or-saved\"}");
+    file.close(io_mod.getIo());
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "");
+    defer alloc.free(home);
+
+    {
+        const env = try CredentialTestEnv.install(alloc, &.{ .{ "HOME", home }, .{ "OPENROUTER_API_KEY", "sk-or-env" }, .{ "AI_GATEWAY_API_KEY", "gateway-key" } });
+        defer env.deinit();
+        const resolution = try resolveForProvider(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .stored, .openrouter, .ai_gateway_api_key);
+        var credential = resolution.credential.?;
+        defer credential.deinit(alloc);
+        try std.testing.expectEqual(Source.openrouter_api_key, credential.source);
+        try std.testing.expectEqualStrings("sk-or-env", credential.token);
+        try std.testing.expect(try sourceExists(alloc, host.unavailable_secret_store, .openrouter_login));
+    }
+    {
+        const env = try CredentialTestEnv.install(alloc, &.{ .{ "HOME", home }, .{ "AI_GATEWAY_API_KEY", "gateway-key" } });
+        defer env.deinit();
+        const resolution = try resolveForProvider(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .stored, .openrouter, null);
+        var credential = resolution.credential.?;
+        defer credential.deinit(alloc);
+        try std.testing.expectEqual(Source.openrouter_login, credential.source);
+        try std.testing.expectEqualStrings("sk-or-saved", credential.token);
+        // The Gateway never sees an OpenRouter key.
+        const gateway = try resolveForProvider(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .stored, .gateway, null);
+        var gateway_credential = gateway.credential.?;
+        defer gateway_credential.deinit(alloc);
+        try std.testing.expectEqual(Source.ai_gateway_api_key, gateway_credential.source);
+    }
+    try tmp.dir.deleteFile(io_mod.getIo(), ".fx/" ++ profile_paths.openrouter_auth_file_name);
+    {
+        const env = try CredentialTestEnv.install(alloc, &.{.{ "HOME", home }});
+        defer env.deinit();
+        const resolution = try resolveForProvider(alloc, oauth_transport.unavailable_provider, host.unavailable_secret_store, .stored, .openrouter, null);
+        try std.testing.expect(resolution.credential == null and resolution.failure == null);
+    }
+}
+
 test "credential source presence reads metadata without parsing session secrets" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1370,6 +1460,7 @@ test "credential source presence reads metadata without parsing session secrets"
         .{ .source = .fx_login, .file_name = profile_paths.auth_file_name },
         .{ .source = .chatgpt_subscription, .file_name = profile_paths.chatgpt_auth_file_name },
         .{ .source = .grok_subscription, .file_name = profile_paths.grok_auth_file_name },
+        .{ .source = .openrouter_login, .file_name = profile_paths.openrouter_auth_file_name },
     };
     for (cases) |case| {
         var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;

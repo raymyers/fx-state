@@ -3146,6 +3146,7 @@ const App = struct {
         );
 
         if (try self.model_cache.pollLoadTransition()) {
+            try provider_runtime.noteCatalogMiss(self);
             RenderAppRuntime.requestActiveSurfaceFrame(self, .footer);
         }
         if (try app_commands.Handlers(App).collectUsageDashboardFacts(self)) {
@@ -4903,6 +4904,12 @@ test {
     _ = @import("gateway/openai_codex_permission_reviewer.zig");
     _ = @import("core/auth/grok_session.zig");
     _ = @import("core/auth/grok_oauth.zig");
+    _ = @import("core/auth/openrouter_session.zig");
+    _ = @import("core/auth/openrouter_oauth.zig");
+    _ = @import("gateway/openrouter.zig");
+    _ = @import("gateway/openrouter_models.zig");
+    _ = @import("gateway/host_openrouter.zig");
+    _ = @import("core/config/openrouter_endpoints.zig");
     _ = @import("gateway/xai_grok_models.zig");
     _ = @import("gateway/xai_grok.zig");
     _ = @import("gateway/xai_grok_permission_reviewer.zig");

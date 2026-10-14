@@ -75,6 +75,7 @@ pub const Agent = struct {
         addOptional(&self.turn_usage.cache_read_tokens, usage.cache_read_tokens);
         addOptional(&self.turn_usage.cache_write_tokens, usage.cache_write_tokens);
         addOptional(&self.turn_usage.reasoning_tokens, usage.reasoning_tokens);
+        if (usage.cost) |cost| self.turn_usage.cost = (self.turn_usage.cost orelse 0) + cost;
     }
 
     pub fn appendHistoryEntry(
@@ -283,6 +284,10 @@ test "Agent accumulates per-turn usage with saturation" {
     try std.testing.expectEqual(@as(?u64, 7), agent.turn_usage.input_tokens);
     try std.testing.expectEqual(@as(?u64, 2), agent.turn_usage.output_tokens);
     try std.testing.expectEqual(@as(?u64, 1), agent.turn_usage.reasoning_tokens);
+    try std.testing.expect(agent.turn_usage.cost == null);
+    agent.observeUsage(.{ .cost = 0.25 });
+    agent.observeUsage(.{ .cost = 0.5 });
+    try std.testing.expectEqual(@as(?f64, 0.75), agent.turn_usage.cost);
 
     agent.observeUsage(.{ .input_tokens = std.math.maxInt(u64) });
     try std.testing.expectEqual(

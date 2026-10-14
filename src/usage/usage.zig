@@ -12,6 +12,7 @@ pub const cache = @import("cache.zig");
 pub const view = @import("view.zig");
 pub const codex = @import("codex.zig");
 pub const grok = @import("grok.zig");
+pub const openrouter = @import("openrouter.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -30,6 +31,8 @@ pub const Service = enum {
     chatgpt,
     /// The Grok CLI proxy, `cli-chat-proxy.grok.com/v1` (`/billing`).
     grok,
+    /// OpenRouter's API, `openrouter.ai/api/v1` (`/key`).
+    openrouter,
 };
 
 pub const Request = struct {
@@ -129,6 +132,9 @@ pub const Snapshot = struct {
     /// For `.grok`: the Grok plan's allowance and credits, when fetched.
     grok_usage: ?grok.Usage = null,
     grok_at_ms: ?i64 = null,
+    /// For `.openrouter`: the key's spend and limit, when fetched.
+    openrouter_usage: ?openrouter.Usage = null,
+    openrouter_at_ms: ?i64 = null,
 
     pub fn of(self: *const Snapshot, period: Period) *const View {
         return &self.views[@backingInt(period)];
@@ -200,6 +206,7 @@ pub const Snapshot = struct {
     pub fn fetchedAtMs(self: *const Snapshot) ?i64 {
         if (self.scope == .codex) return self.codex_at_ms;
         if (self.scope == .grok) return self.grok_at_ms;
+        if (self.scope == .openrouter) return self.openrouter_at_ms;
         return self.views[0].fetched_at_ms;
     }
 
@@ -350,6 +357,8 @@ pub const Dashboard = struct {
         const codex_usage: ?codex.Usage = if (codex_entry) |c| try c.value.clone(arena.allocator()) else null;
         const grok_entry: ?cache.Grok = if (entry) |e| e.grok else null;
         const grok_usage: ?grok.Usage = if (grok_entry) |g| try g.value.clone(arena.allocator()) else null;
+        const openrouter_entry: ?cache.OpenRouter = if (entry) |e| e.openrouter else null;
+        const openrouter_usage: ?openrouter.Usage = if (openrouter_entry) |o| try o.value.clone(arena.allocator()) else null;
         return .{
             .arena = arena,
             .views = views,
@@ -361,6 +370,8 @@ pub const Dashboard = struct {
             .codex_at_ms = if (codex_entry) |c| c.at_ms else null,
             .grok_usage = grok_usage,
             .grok_at_ms = if (grok_entry) |g| g.at_ms else null,
+            .openrouter_usage = openrouter_usage,
+            .openrouter_at_ms = if (openrouter_entry) |o| o.at_ms else null,
         };
     }
 
@@ -637,6 +648,7 @@ const Run = struct {
     breakdown_part: ?codex.BreakdownOwned = null,
     grok_part: ?grok.Owned = null,
     settings_part: ?grok.SettingsOwned = null,
+    openrouter_part: ?openrouter.Owned = null,
 
     fn deinit(self: *Run) void {
         for (self.parts.items) |*p| p.deinit();
@@ -646,6 +658,7 @@ const Run = struct {
         if (self.breakdown_part) |*b| b.deinit();
         if (self.grok_part) |*g| g.deinit();
         if (self.settings_part) |*s| s.deinit();
+        if (self.openrouter_part) |*o| o.deinit();
     }
 
     fn fail(self: *Run, outcome: Outcome) error{Stop} {
@@ -691,6 +704,7 @@ fn collect(run: *Run) error{Stop}!cache.Entry {
     const job = run.job;
     if (job.scope == .codex) return .{ .codex = .{ .at_ms = job.started_ms, .value = try fetchCodex(run) } };
     if (job.scope == .grok) return .{ .grok = .{ .at_ms = job.started_ms, .value = try fetchGrok(run) } };
+    if (job.scope == .openrouter) return .{ .openrouter = .{ .at_ms = job.started_ms, .value = try fetchOpenRouter(run) } };
     var fetched: cache.Entry = .{
         .today = .{ .day = job.plan.day, .at_ms = job.started_ms, .models = try fetchRows(run, job.plan.todayRange()) },
     };
@@ -811,6 +825,21 @@ fn fetchGrok(run: *Run) error{Stop}!grok.Usage {
     // keeps the name it already has.
     if (fetchGrokSettings(run)) |settings| value.settings = settings else |_| {}
     return value;
+}
+
+/// The key's spend and limit. Borrows from `run`.
+fn fetchOpenRouter(run: *Run) error{Stop}!openrouter.Usage {
+    const gpa = run.dashboard.gpa;
+    const body = try get(run, .{
+        .service = .openrouter,
+        .path = openrouter.key_path,
+        .bearer = run.job.bearer,
+        .team = null,
+    });
+    defer gpa.free(body);
+    const owned = openrouter.parseKey(gpa, body) catch return run.fail(.{ .failed = .bad_response });
+    run.openrouter_part = owned;
+    return owned.usage;
 }
 
 fn fetchGrokSettings(run: *Run) error{Stop}!grok.Settings {

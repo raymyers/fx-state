@@ -43,6 +43,7 @@ pub const LogoutFacts = struct {
 
 pub fn decideLogoutProvider(facts: LogoutFacts) model_provider.ProviderId {
     if (facts.requested) |provider| return provider;
+    if (facts.selected == .openrouter or facts.active_source == .openrouter_login) return .openrouter;
     if (facts.selected == .grok or facts.active_source == .grok_subscription) return .grok;
     if (facts.selected == .codex or facts.active_source == .chatgpt_subscription) return .codex;
     if (facts.active_source == .fx_login) return .gateway;
@@ -73,7 +74,7 @@ pub fn logoutFallbackProviders(facts: LogoutFacts) [2]?model_provider.ProviderId
                 facts.available_sources.contains(.stored_key),
             .codex => facts.available_sources.contains(.chatgpt_subscription),
             .grok => facts.available_sources.contains(.grok_subscription),
-            .configured => false,
+            .openrouter, .configured => false,
         };
         if (!available) continue;
         candidates[count] = provider;
@@ -148,7 +149,7 @@ pub fn signInCompletion(
 ) SignInCompletionAction {
     return switch (provider) {
         .gateway => .vercel,
-        .configured => .{ .switch_provider = provider },
+        .openrouter, .configured => .{ .switch_provider = provider },
         .codex => if (provider_routing_supported)
             .{ .switch_provider = .codex }
         else

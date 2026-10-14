@@ -73,6 +73,11 @@ const Line = union(enum) {
     grok_product_row: usize,
     grok_plan_header,
     grok_plan_row,
+    openrouter_spend_header,
+    /// Today, this week, this month, then all time.
+    openrouter_spend_row: usize,
+    openrouter_limit_header,
+    openrouter_limit_row,
 };
 
 const max_lines = 40;
@@ -95,6 +100,7 @@ fn messageOnly(p: Projection) bool {
     if (s.status == .unavailable) return true;
     if (s.scope == .codex) return s.codex_usage == null;
     if (s.scope == .grok) return s.grok_usage == null;
+    if (s.scope == .openrouter) return s.openrouter_usage == null;
     for (s.views) |v| if (!v.empty()) return false;
     return s.status != .ready;
 }
@@ -111,16 +117,23 @@ pub fn isGrok(p: Projection) bool {
     return s.scope == .grok;
 }
 
-/// A provider's plan (Codex, Grok) rather than AI Gateway spend: nothing to
-/// select or open.
+/// An OpenRouter key: its credit spend and limit.
+pub fn isOpenRouter(p: Projection) bool {
+    const s = p.snapshot orelse return false;
+    return s.scope == .openrouter;
+}
+
+/// A provider's plan (Codex, Grok, an OpenRouter key) rather than AI Gateway
+/// spend: nothing to select or open.
 pub fn isPlan(p: Projection) bool {
-    return isCodex(p) or isGrok(p);
+    return isCodex(p) or isGrok(p) or isOpenRouter(p);
 }
 
 /// The service the numbers come from, for messages.
 fn serviceName(p: Projection) []const u8 {
     if (isCodex(p)) return "ChatGPT";
     if (isGrok(p)) return "Grok";
+    if (isOpenRouter(p)) return "OpenRouter";
     return "AI Gateway";
 }
 
@@ -142,6 +155,7 @@ pub fn desiredRowCount(p: Projection) usize {
     if (messageOnly(p)) return 3;
     if (isCodex(p)) return codexRows(p, codexSections(p, max_lines));
     if (isGrok(p)) return grokRows(grokSections(p, max_lines));
+    if (isOpenRouter(p)) return openrouter_rows;
     if (p.detail) return detail_rows;
     const models = listedModels(p).len;
     if (models == 0) return tableRows(p) + 1;
@@ -231,6 +245,14 @@ fn layout(p: Projection, visible_rows: usize, buf: *[max_lines]Line) []const Lin
         push(buf, &n, .grok_plan_row);
         return buf[0..n];
     }
+    if (isOpenRouter(p)) {
+        push(buf, &n, .openrouter_spend_header);
+        for (0..openrouter_spans.len) |i| push(buf, &n, .{ .openrouter_spend_row = i });
+        push(buf, &n, .blank);
+        push(buf, &n, .openrouter_limit_header);
+        push(buf, &n, .openrouter_limit_row);
+        return buf[0..n];
+    }
     if (p.detail) {
         push(buf, &n, .detail_period_header);
         for (Period.all) |period| push(buf, &n, .{ .detail_period_row = period });
@@ -287,6 +309,10 @@ pub fn composeRow(alloc: Allocator, p: Projection, row_index: u16, visible_rows:
         .tokens_row => |period| composeTokensRow(alloc, p, period, limit),
         .perf_header => composeCells(alloc, if (limit >= widePerfWidth()) &perf_header_wide else &perf_header_narrow, .header, "", limit),
         .perf_row => |period| composePerfRow(alloc, p, period, limit),
+        .openrouter_spend_header => composeCells(alloc, &openrouter_spend_header, .header, "", limit),
+        .openrouter_spend_row => |index| composeOpenRouterSpendRow(alloc, p, index, limit),
+        .openrouter_limit_header => composeCells(alloc, &openrouter_limit_header, .header, "", limit),
+        .openrouter_limit_row => composeOpenRouterLimitRow(alloc, p, limit),
         .codex_plan_header => composeCodexPlanHeader(alloc, p, limit),
         .codex_plan_row => composeCodexPlanRow(alloc, p, limit),
         .codex_limit_header => composeCodexLimitHeader(alloc, p, limit),
@@ -1135,6 +1161,54 @@ fn composeGrokPlanRow(alloc: Allocator, p: Projection, limit: usize) !std.ArrayL
         .{ .text = credits, .width = 11 },
         .{ .text = "", .width = 3 },
         .{ .text = payg, .width = grokPaygWidth(u), .left = true },
+    };
+    return composeCells(alloc, &cells, .data, "", limit);
+}
+
+// ------------------------------------------------------------- openrouter
+
+const openrouter_spans = [_][]const u8{ "today", "this week", "this month", "all time" };
+// heading, blank, spend header and rows, blank, limit header and row
+const openrouter_rows: usize = 2 + 1 + openrouter_spans.len + 1 + 2;
+
+const openrouter_spend_header = [_]Cell{
+    .{ .text = "period", .width = 12, .left = true },
+    .{ .text = "spend", .width = 12 },
+};
+
+const openrouter_limit_header = [_]Cell{
+    .{ .text = "limit", .width = 12, .left = true },
+    .{ .text = "left", .width = 12 },
+    .{ .text = "", .width = 3 },
+    .{ .text = "resets", .width = 10, .left = true },
+};
+
+fn composeOpenRouterSpendRow(alloc: Allocator, p: Projection, index: usize, limit: usize) !std.ArrayList(u8) {
+    const u = p.snapshot.?.openrouter_usage.?;
+    const spent: ?f64 = switch (index) {
+        0 => u.used_daily,
+        1 => u.used_weekly,
+        2 => u.used_monthly,
+        else => u.used,
+    };
+    var spent_buf: [32]u8 = undefined;
+    const cells = [_]Cell{
+        .{ .text = openrouter_spans[index], .width = 12, .left = true },
+        .{ .text = if (spent) |value| (std.mem.print(&spent_buf, "${d:.4}", .{value}) catch "-") else "-", .width = 12 },
+    };
+    return composeCells(alloc, &cells, .data, "", limit);
+}
+
+fn composeOpenRouterLimitRow(alloc: Allocator, p: Projection, limit: usize) !std.ArrayList(u8) {
+    const u = p.snapshot.?.openrouter_usage.?;
+    var limit_buf: [32]u8 = undefined;
+    var left_buf: [32]u8 = undefined;
+    var reset_buf: [32]u8 = undefined;
+    const cells = [_]Cell{
+        .{ .text = if (u.limit) |value| (std.mem.print(&limit_buf, "${d:.2}", .{value}) catch "-") else "none", .width = 12, .left = true },
+        .{ .text = if (u.limit_remaining) |value| (std.mem.print(&left_buf, "${d:.2}", .{value}) catch "-") else "-", .width = 12 },
+        .{ .text = "", .width = 3 },
+        .{ .text = if (u.limit_reset) |reset| safeText(&reset_buf, reset) else "never", .width = 10, .left = true },
     };
     return composeCells(alloc, &cells, .data, "", limit);
 }

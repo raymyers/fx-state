@@ -331,18 +331,20 @@ pub fn selectProviderModel(
         .gateway => default_model,
         .codex => run_model orelse return error.CodexModelNotSelected,
         .grok => run_model orelse return error.GrokModelNotSelected,
+        .openrouter => model_provider.openrouter_default_model,
         .configured => run_model orelse return error.ConfiguredModelNotSelected,
     };
     return .{ .provider = provider, .model = model };
 }
 
 /// User-facing guidance for a `ModelSelectionError`, or null for any other error.
-pub fn modelNotSelectedMessage(err: anyerror) ?[]const u8 {
+pub fn startupErrorMessage(err: anyerror) ?[]const u8 {
     const for_this_run = "or set a model for this run with --model or FX_MODEL";
     return switch (err) {
         error.CodexModelNotSelected => "no Codex model is selected; run `fx provider codex` to choose one, " ++ for_this_run,
         error.GrokModelNotSelected => "no Grok model is selected; run `fx provider grok` to choose one, " ++ for_this_run,
         error.ConfiguredModelNotSelected => "no model is selected for this connection; save one under \"models\" in ~/.fx/settings.json, " ++ for_this_run,
+        error.OpenRouterConnectionConflict => "the custom connection \"openrouter\" in ~/.fx/settings.json conflicts with the built-in OpenRouter provider; rename or delete it under \"providers\"",
         else => null,
     };
 }
@@ -4649,6 +4651,20 @@ test "selectProviderModel chooses only its provider-scoped model" {
     try std.testing.expectEqualStrings("gateway/model", overridden_gateway.model);
 }
 
+test "selectProviderModel defaults OpenRouter until a model is saved" {
+    const unset = Settings{ .provider = .openrouter };
+    const default = try selectProviderModel("default/model", &unset, null, null);
+    try std.testing.expectEqual(model_provider.ProviderId.openrouter, default.provider);
+    try std.testing.expectEqualStrings("anthropic/claude-sonnet-5.5", default.model);
+
+    var saved = Settings{ .provider = .openrouter };
+    defer saved.deinit(std.testing.allocator);
+    try saved.models.putCopy(std.testing.allocator, .openrouter, "openai/gpt-5");
+    try saved.models.putCopy(std.testing.allocator, .gateway, "gateway/model");
+    try std.testing.expectEqualStrings("openai/gpt-5", (try selectProviderModel("default/model", &saved, null, null)).model);
+    try std.testing.expectEqualStrings("gateway/model", (try selectProviderModel("default/model", &saved, .gateway, null)).model);
+}
+
 test "selectProviderModel accepts the run model when the provider has none saved" {
     // FX_PROVIDER=codex FX_MODEL=... in a profile that never saved a Codex model.
     const missing_codex = Settings{ .provider = .codex };
@@ -4684,13 +4700,14 @@ test "selectProviderModel accepts the run model when the provider has none saved
     try std.testing.expectEqualStrings("default/model", gateway.model);
 }
 
-test "modelNotSelectedMessage names the provider and both ways to recover" {
-    const codex = modelNotSelectedMessage(error.CodexModelNotSelected).?;
+test "startupErrorMessage names the provider and both ways to recover" {
+    const codex = startupErrorMessage(error.CodexModelNotSelected).?;
     try std.testing.expect(std.mem.find(u8, codex, "`fx provider codex`") != null);
     try std.testing.expect(std.mem.find(u8, codex, "--model or FX_MODEL") != null);
-    try std.testing.expect(std.mem.find(u8, modelNotSelectedMessage(error.GrokModelNotSelected).?, "`fx provider grok`") != null);
-    try std.testing.expect(std.mem.find(u8, modelNotSelectedMessage(error.ConfiguredModelNotSelected).?, "\"models\" in ~/.fx/settings.json") != null);
-    try std.testing.expect(modelNotSelectedMessage(error.OutOfMemory) == null);
+    try std.testing.expect(std.mem.find(u8, startupErrorMessage(error.GrokModelNotSelected).?, "`fx provider grok`") != null);
+    try std.testing.expect(std.mem.find(u8, startupErrorMessage(error.ConfiguredModelNotSelected).?, "\"models\" in ~/.fx/settings.json") != null);
+    try std.testing.expect(std.mem.find(u8, startupErrorMessage(error.OpenRouterConnectionConflict).?, "rename or delete it") != null);
+    try std.testing.expect(startupErrorMessage(error.OutOfMemory) == null);
 }
 
 test "FX_ULTRAFAST overrides the profile and diagnoses malformed values" {

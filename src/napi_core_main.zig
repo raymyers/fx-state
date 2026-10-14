@@ -15,6 +15,7 @@ const streamable_http = @import("core/mcp/streamable_http.zig");
 const host_stream_provider = @import("gateway/host_stream_provider.zig");
 const host_openai_codex = @import("gateway/host_openai_codex.zig");
 const host_xai_grok = @import("gateway/host_xai_grok.zig");
+const host_openrouter = @import("gateway/host_openrouter.zig");
 const host_chat_completions = @import("gateway/host_chat_completions.zig");
 const configured_provider = @import("core/config/configured_provider.zig");
 const provider_catalog = @import("core/auth/provider_catalog.zig");
@@ -638,6 +639,7 @@ const Runtime = struct {
     stream_context: host_stream_provider.ProviderContext = undefined,
     codex_context: host_openai_codex.Context = undefined,
     grok_context: host_xai_grok.Context = undefined,
+    openrouter_context: host_openrouter.Context = undefined,
     /// The app's configured provider, when `provider` names one.
     custom_context: ?host_chat_completions.Context = null,
     input: InputQueue = .{},
@@ -701,6 +703,7 @@ const Runtime = struct {
             .agent_stream = host_xai_grok.provider(&self.grok_context),
             .model_catalog = host_xai_grok.modelCatalogProvider(&self.grok_context),
         };
+        providers.openrouter = host_openrouter.bundle(&self.openrouter_context);
         if (self.custom_context) |*context| {
             providers.configured_fn = host_chat_completions.bundle;
             providers.configured_context = context;
@@ -949,7 +952,7 @@ const CreateError = error{
 const max_provider_bytes = configured_provider.max_id_bytes;
 const max_configured_providers_bytes = 1024 * 1024;
 
-/// Reads the optional `provider` option: "gateway", "codex", "grok", or the name
+/// Reads the optional `provider` option: "gateway", "codex", "grok", "openrouter", or the name
 /// of the provider that the `configuredProviders` option defines.
 fn getProvider(env: c.napi_env, options: c.napi_value) CreateError!?model_provider.ProviderId {
     const alloc = std.heap.c_allocator;
@@ -962,6 +965,7 @@ fn getProvider(env: c.napi_env, options: c.napi_value) CreateError!?model_provid
     if (std.mem.eql(u8, raw, "gateway")) return .gateway;
     if (std.mem.eql(u8, raw, "codex")) return .codex;
     if (std.mem.eql(u8, raw, "grok")) return .grok;
+    if (std.mem.eql(u8, raw, "openrouter")) return .openrouter;
     const configured = model_provider.parse(raw) orelse return error.InvalidProvider;
     if (configured != .configured) return error.InvalidProvider;
     return configured;
@@ -1064,6 +1068,7 @@ fn createRuntime(env: c.napi_env, options: c.napi_value) CreateError!*Runtime {
     });
     runtime.codex_context = .{ .transport = runtime.stream_context.transport };
     runtime.grok_context = .{ .transport = runtime.stream_context.transport };
+    runtime.openrouter_context = .{ .transport = runtime.stream_context.transport };
     if (configured_providers) |json| {
         var context = host_chat_completions.Context.init(alloc, runtime.stream_context.transport, json) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1481,6 +1486,9 @@ export fn napi_register_module_v1(env: c.napi_env, exports: c.napi_value) callco
     var supports_grok: c.napi_value = undefined;
     if (!statusOk(env, c.napi_get_boolean(env, true, &supports_grok), "could not create Grok capability")) return null;
     if (!statusOk(env, c.napi_set_named_property(env, exports, "supportsGrok", supports_grok), "could not export Grok capability")) return null;
+    var supports_openrouter: c.napi_value = undefined;
+    if (!statusOk(env, c.napi_get_boolean(env, true, &supports_openrouter), "could not create OpenRouter capability")) return null;
+    if (!statusOk(env, c.napi_set_named_property(env, exports, "supportsOpenRouter", supports_openrouter), "could not export OpenRouter capability")) return null;
     var supports_configured: c.napi_value = undefined;
     if (!statusOk(env, c.napi_get_boolean(env, true, &supports_configured), "could not create configured provider capability")) return null;
     if (!statusOk(env, c.napi_set_named_property(env, exports, "supportsConfiguredProvider", supports_configured), "could not export configured provider capability")) return null;

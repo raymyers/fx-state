@@ -1176,8 +1176,8 @@ const AskContext = struct {
             .fast_mode = self.fast_mode,
             .ultrafast_mode = self.ultrafast_mode,
             .effort = self.effort,
-            .provider_order = if (self.provider == .gateway) self.provider_order else &.{},
-            .provider_strict = self.provider == .gateway and self.provider_strict,
+            .provider_order = if (self.provider.routesByProviderOrder()) self.provider_order else &.{},
+            .provider_strict = self.provider.routesByProviderOrder() and self.provider_strict,
             .first_call_tool_choice = self.first_call_tool_choice,
             .permission_mode = self.permission_mode,
             .permission_grants = &.{},
@@ -1373,7 +1373,7 @@ fn writeAskUsage(deps: RunDeps, usage: []const u8) !void {
 
 fn askErrorNotice(err: anyerror) ?[]const u8 {
     if (auth_runtime.preparationFailureNotice(err)) |notice| return notice;
-    if (config_runtime.modelNotSelectedMessage(err)) |message| return message;
+    if (config_runtime.startupErrorMessage(err)) |message| return message;
     return switch (err) {
         error.ImagePreparationFailed => image_attachments.image_preparation_failed_notice,
         error.ModelImageCapabilityUnavailable => image_attachments.model_image_capability_unavailable_notice,
@@ -2058,8 +2058,8 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         .fast_mode = ctx.fast_mode,
         .ultrafast_mode = ctx.ultrafast_mode,
         .effort = ctx.effort,
-        .provider_order = if (ctx.provider == .gateway) ctx.provider_order else &.{},
-        .provider_strict = ctx.provider == .gateway and ctx.provider_strict,
+        .provider_order = if (ctx.provider.routesByProviderOrder()) ctx.provider_order else &.{},
+        .provider_strict = ctx.provider.routesByProviderOrder() and ctx.provider_strict,
         .first_call_tool_choice = ctx.first_call_tool_choice,
         .workspace_root = ctx.workspace_root,
         .access_scope = ctx.workspace_access.scope(ctx.workspace_root),
@@ -4377,7 +4377,14 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
         try out.writer.writeAll("}");
     }
     try out.writer.writeAll("],\"usage\":");
-    try std.json.Stringify.value(.{
+    // Cost appears only when the provider reported one, such as OpenRouter.
+    if (result.usage.cost) |cost| {
+        try std.json.Stringify.value(.{
+            .input_tokens = result.usage.input_tokens,
+            .output_tokens = result.usage.output_tokens,
+            .cost = cost,
+        }, .{}, &out.writer);
+    } else try std.json.Stringify.value(.{
         .input_tokens = result.usage.input_tokens,
         .output_tokens = result.usage.output_tokens,
     }, .{}, &out.writer);

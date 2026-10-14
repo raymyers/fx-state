@@ -90,7 +90,15 @@ pub fn Runtime(comptime App: type) type {
                         column.labels[i] = provider_picker_catalog.methodSlug(method);
                         const in_use = provider.eql(active_provider) and
                             if (active_source) |source| provider_picker_catalog.methodMatchesSource(method, source) else false;
-                        column.annotations[i] = if (in_use) "current" else "";
+                        column.annotations[i] = if (in_use)
+                            "current"
+                        else if (provider == .openrouter)
+                            switch (method) {
+                                .oauth => "sign in with browser",
+                                .api_key => "paste API key",
+                            }
+                        else
+                            "";
                     }
                     count = methods.len;
                 },
@@ -259,7 +267,9 @@ pub fn Runtime(comptime App: type) type {
             switch (query.stage) {
                 .provider => {
                     const provider = provider_catalog.parse(selected) orelse return false;
-                    if (provider_picker_catalog.providerMethods(provider).len == 0) {
+                    // A detected OpenRouter key needs no sign-in: switch to it.
+                    const openrouter_ready = provider == .openrouter and openRouterKeyAvailable(app);
+                    if (provider_picker_catalog.providerMethods(provider).len == 0 or openrouter_ready) {
                         try commit(app, .{ .provider = provider });
                         return true;
                     }
@@ -280,6 +290,18 @@ pub fn Runtime(comptime App: type) type {
                     const provider = provider_catalog.parse(
                         app.input_runtime.picker.provider_picker_pending_provider.items,
                     ) orelse .gateway;
+                    if (provider == .openrouter) {
+                        switch (method) {
+                            .api_key => try openKeyStage(app, query.prefix, .api_key),
+                            .oauth => {
+                                app.input_runtime.picker.clearProviderPickerFlow();
+                                app.input_runtime.inputResetState().clearCurrent(app.alloc);
+                                try app_auth_runtime.Runtime(App).beginOpenRouterSignIn(app);
+                                app.shell.render_requests.request(.footer);
+                            },
+                        }
+                        return true;
+                    }
                     if (method == .api_key) {
                         // With detected keys the next column asks which to use
                         // (or `new` to paste one); with none there is nothing
@@ -373,7 +395,10 @@ pub fn Runtime(comptime App: type) type {
 
             try setComposerText(app, "{s}{s} {s} ", .{ stable_prefix, provider_slug, method_slug });
             try app.input_runtime.picker.beginProviderPickerFlow(app.alloc, provider_slug, method_slug, stage);
-            if (stage == .api_key) app.auth.openApiKeyPickerInline(app.alloc);
+            if (stage == .api_key) {
+                const target: auth_runtime.ApiKeyTarget = if ((provider_catalog.parse(provider_slug) orelse .gateway) == .openrouter) .openrouter else .gateway;
+                app.auth.openApiKeyPickerInlineFor(app.alloc, target);
+            }
             app.shell.render_requests.request(.footer);
         }
 
@@ -446,6 +471,11 @@ pub fn Runtime(comptime App: type) type {
             app.input_runtime.inputResetState().clearCurrent(app.alloc);
             try app_auth_runtime.Runtime(App).applyPickerChoice(app, choice);
             app.shell.render_requests.request(.footer);
+        }
+
+        fn openRouterKeyAvailable(app: *App) bool {
+            const view = app.auth.pickerView();
+            return view.available_sources.contains(.openrouter_api_key) or view.available_sources.contains(.openrouter_login);
         }
 
         /// An ambient OIDC token satisfies the oauth method without a browser

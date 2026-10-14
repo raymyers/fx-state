@@ -1,5 +1,6 @@
 const std = @import("std");
 const codec = @import("chat_completions_protocol.zig");
+const openrouter = @import("openrouter.zig");
 const client_mod = @import("client.zig");
 const definitions = @import("../core/config/configured_provider.zig");
 const streams = @import("../core/agent/stream_provider.zig");
@@ -10,6 +11,7 @@ const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_catalog_metadata = @import("../core/gateway/model_catalog_metadata.zig");
 const classifier = @import("../core/permissions/auto_classifier.zig");
 const gateway_step = @import("../core/agent/runtime/gateway_step.zig");
+const model_response_recovery = @import("../core/agent/runtime/model_response_recovery.zig");
 const review_messages = @import("vercel_protocol.zig");
 const io = @import("../core/shared/io.zig");
 const secret = @import("../core/auth/secret.zig");
@@ -41,6 +43,9 @@ fn definition_at(raw: ?*anyopaque) *const definitions.Definition {
 }
 
 fn bound_identity(definition: *const definitions.Definition) model_provider.ProviderId {
+    if (definition.builtin) |builtin| return switch (builtin) {
+        .openrouter => .openrouter,
+    };
     var identity = model_provider.parse(definition.id).?;
     identity.configured.binding = definition.binding_identity();
     return identity;
@@ -60,7 +65,20 @@ pub fn build_for(definition: *const definitions.Definition, alloc: Allocator, re
             break;
         }
     };
-    return codec.build_request(alloc, request, .{ .tool_choice_mode = definition.tool_choice_mode, .provider = &identity });
+    var sent = request;
+    // The side model always reasons, and its default effort can spend a
+    // title's small output budget before any text. Titles are the side calls
+    // without tools. Reviews keep the default: at minimal effort the model
+    // flagged harmless commands. Agent turns on the same model keep it too.
+    const title_call = sent.tool_choice == .none;
+    if (definition.builtin == .openrouter and title_call and sent.provider_options.reasoning == null and std.mem.eql(u8, sent.model, openrouter.side_model)) {
+        sent.provider_options.reasoning = openrouter.side_model_effort;
+    }
+    return codec.build_request(alloc, sent, .{
+        .tool_choice_mode = definition.tool_choice_mode,
+        .dialect = if (definition.builtin == .openrouter) .openrouter else .standard,
+        .provider = &identity,
+    });
 }
 
 pub fn project_replay(alloc: Allocator, replay: ?types.ProviderReplay, calls: []const types.ToolCall, text: bool, reasoning: bool) !?types.ProviderReplay {
@@ -108,7 +126,9 @@ test "chat completions adapter binds replay to endpoint authority and wires proj
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: streams.ModelRequest) !streams.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
     const definition = definition_at(raw);
-    if (request.credential.credentialSource() != .configured) return error.ConfiguredProviderCredentialRequired;
+    if (definition.builtin != null) {
+        if (!model_provider.authorizesCredential(bound_identity(definition), request.credential.credentialSource())) return error.ProviderCredentialRequired;
+    } else if (request.credential.credentialSource() != .configured) return error.ConfiguredProviderCredentialRequired;
     const token = request.credential.secret();
     if (token) |value| {
         if (value.len > 16 * 1024) return error.InvalidConfiguredProviderCredential;
@@ -139,19 +159,27 @@ fn phase_deadline(milliseconds: i64, caller: ?std.Io.Clock.Timestamp) std.Io.Clo
 }
 
 fn post(alloc: Allocator, definition: *const definitions.Definition, request: streams.ModelRequest, token: ?[]const u8, payload: []const u8) !streams.Result {
-    const url = try definition.chat_url(alloc);
+    const url = if (definition.builtin == .openrouter) try openrouter.chat_url(alloc) else try definition.chat_url(alloc);
     defer alloc.free(url);
     const authorization = if (token) |value| try alloc.print("Bearer {s}", .{value}) else null;
     defer if (authorization) |value| secret.zeroAndFree(alloc, value);
-    var client: std.http.Client = .{ .allocator = alloc, .io = io.getIo() };
-    defer client.deinit();
+    // OpenRouter keeps one connection pool for the process; other connections
+    // dial per request.
+    const pool = if (definition.builtin == .openrouter) openrouter.pool() else null;
+    var local_client: std.http.Client = .{ .allocator = alloc, .io = io.getIo() };
+    defer local_client.deinit();
+    const client = if (pool) |shared| shared.clientFor(url) else &local_client;
     var uri = try std.Uri.parse(url);
     uri.scheme = if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) "https" else if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) "http" else return error.UnsupportedUriScheme;
     var operation = client_mod.PostOperation{
-        .client = &client,
+        .client = client,
+        .keep_alive = pool != null,
         .uri = uri,
         .authorization = authorization,
-        .extra_headers = &.{.{ .name = "accept", .value = "text/event-stream" }},
+        .extra_headers = if (definition.builtin == .openrouter)
+            &([_]std.http.Header{.{ .name = "accept", .value = "text/event-stream" }} ++ openrouter.attribution_headers)
+        else
+            &.{.{ .name = "accept", .value = "text/event-stream" }},
     };
     try request.admission.admit();
     var opened = try client_mod.openBoundedPost(alloc, request.cancel_flag, phase_deadline(30_000, request.deadline), &operation);
@@ -178,7 +206,7 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     var retry_after: ?u64 = null;
     var headers = response.head.iterateHeaders();
     while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
-        retry_after = std.fmt.parseUnsigned(u64, std.mem.trim(u8, header.value, " \t"), 10) catch null;
+        retry_after = model_response_recovery.parseRetryAfter(header.value, @divFloor(io.milliTimestamp(), std.time.ms_per_s));
         break;
     };
     var transfer: [64 * 1024]u8 = undefined;
@@ -194,17 +222,47 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
             alloc.free(detail);
             detail = redacted;
         }
+        if (definition.builtin == .openrouter and response.head.status == .payment_required) {
+            alloc.free(detail);
+            detail = try alloc.dupe(u8, openrouter.credits_exhausted_message);
+        }
+        var kind = failure_kind(response.head.status);
+        const options = request.data().provider_options;
+        if (definition.builtin == .openrouter and response.head.status == .service_unavailable and options.provider_order.len != 0) {
+            const routing = try openrouter.routingUnavailableMessage(alloc, options.provider_order, options.provider_strict);
+            alloc.free(detail);
+            detail = routing;
+            // Strict routing fails the same way on every retry.
+            if (options.provider_strict) kind = .provider_error;
+        }
 
-        return .{ .failed = .{ .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
+        return .{ .failed = .{ .kind = kind, .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
-    return consume(alloc, reader, request);
+    const result = try consume(alloc, reader, request);
+    if (pool) |shared| {
+        // The stream ends at [DONE], before the body's end; std returns a
+        // connection to the pool only once the body is read through. A short
+        // watch bounds the drain, and a failed drain just closes the connection.
+        watch.stop();
+        var drain_watch: client_mod.CancelWatch = .{};
+        if (http.connection) |connection| drain_watch.start(request.cancel_flag, phase_deadline(client_mod.pool_drain_budget_ms, null), connection.stream_writer.stream) catch {
+            return result;
+        };
+        defer drain_watch.stop();
+        if (reader.discardRemaining()) |_| shared.noteActivity() else |err| {
+            debug_trace.logf("gateway", "openrouter pool drain failed err={s}", .{@errorName(err)});
+        }
+    }
+    return result;
 }
 
 pub fn failure_kind(status: std.http.Status) streams.FailureKind {
     return switch (status) {
         .bad_request => .invalid_request,
         .unauthorized => .unauthorized,
+        .payment_required => .insufficient_credits,
         .forbidden => .forbidden,
+        .request_timeout => .request_timeout,
         .payload_too_large => .request_too_large,
         .too_many_requests => .rate_limited,
         .internal_server_error => .server_error,
@@ -213,6 +271,45 @@ pub fn failure_kind(status: std.http.Status) streams.FailureKind {
         .gateway_timeout => .gateway_timeout,
         else => .provider_error,
     };
+}
+
+test "the OpenRouter definition carries its built-in identity and replay binding" {
+    try std.testing.expectEqual(model_provider.ProviderId.openrouter, bound_identity(&openrouter.definition));
+    try std.testing.expect(model_provider.authorizesCredential(bound_identity(&openrouter.definition), .openrouter_api_key));
+    try std.testing.expect(!model_provider.authorizesCredential(bound_identity(&openrouter.definition), .configured));
+    const replay = types.ProviderReplay{ .source = .{ .provider = .openrouter, .model = "anthropic/claude-sonnet-5.5" }, .parts_json = "{\"reasoning\":\"kept\",\"_tool_call_ids\":[]}" };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "hi" },
+        .{ .role = .assistant, .content = "hello", .provider_replay = replay },
+        .{ .role = .user, .content = "again" },
+    };
+    const body = try build_for(&openrouter.definition, std.testing.allocator, .{ .model = "anthropic/claude-sonnet-5.5", .messages = &messages, .tools = .{}, .tool_choice = .auto, .provider_options = .{} });
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.find(u8, body, "\"reasoning\":\"kept\"") != null);
+}
+
+test "OpenRouter titles ask the side model for minimal reasoning" {
+    const alloc = std.testing.allocator;
+    const messages = [_]types.ChatMessage{.{ .role = .user, .content = "title this" }};
+    const title = try build_for(&openrouter.definition, alloc, .{ .model = openrouter.side_model, .messages = &messages, .tool_choice = .none, .provider_options = .{}, .max_output_tokens = 128 });
+    defer alloc.free(title);
+    try std.testing.expect(std.mem.find(u8, title, "\"reasoning\":{\"effort\":\"minimal\"}") != null);
+    for ([_]streams.RequestData{
+        .{ .model = "anthropic/claude-sonnet-5.5", .messages = &messages, .tool_choice = .none, .provider_options = .{} },
+        .{ .model = openrouter.side_model, .messages = &messages, .tool_choice = .auto, .provider_options = .{} },
+        .{ .model = openrouter.side_model, .messages = &messages, .tools = .{ .additional_functions = &.{classifier.function_schema} }, .tool_choice = .required, .provider_options = .{} },
+    }) |request| {
+        const turn = try build_for(&openrouter.definition, alloc, request);
+        defer alloc.free(turn);
+        try std.testing.expect(std.mem.find(u8, turn, "\"reasoning\"") == null);
+    }
+}
+
+test "chat completions failure kinds classify credits and timeouts" {
+    try std.testing.expectEqual(streams.FailureKind.insufficient_credits, failure_kind(.payment_required));
+    try std.testing.expectEqual(streams.FailureKind.request_timeout, failure_kind(.request_timeout));
+    try std.testing.expectEqual(streams.FailureKind.rate_limited, failure_kind(.too_many_requests));
+    try std.testing.expectEqual(streams.FailureKind.provider_error, failure_kind(.not_found));
 }
 
 /// Parses a successful streamed reply from `reader`.

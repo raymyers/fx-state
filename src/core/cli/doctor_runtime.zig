@@ -229,7 +229,7 @@ fn appendResolvedStartupCheck(
     const selected = selection catch |err| {
         // Startup refuses this provider, so no model would run.
         snapshot.model = "";
-        try appendCheck(checks, alloc, "startup", .fail, config_runtime.modelNotSelectedMessage(err) orelse @errorName(err));
+        try appendCheck(checks, alloc, "startup", .fail, config_runtime.startupErrorMessage(err) orelse @errorName(err));
         return;
     };
     const model = try alloc.dupe(u8, config_runtime.modelEnvOverride() orelse selected.model);

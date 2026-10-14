@@ -73,6 +73,7 @@ const allowlist: AllowRule[] = [
   rule("src/core/auth/login_flow.zig", "writeStdout", /stdio_acquisition_write/, "noninteractive_output", "CLI auth login output"),
   rule("src/core/auth/chatgpt_oauth.zig", "writeStdout", /stdio_acquisition_write/, "noninteractive_output", "Codex CLI login output"),
   rule("src/core/auth/grok_oauth.zig", "writeStdout", /stdio_acquisition_write/, "noninteractive_output", "Grok CLI login output"),
+  rule("src/core/auth/openrouter_oauth.zig", "writeStdout", /stdio_acquisition_write/, "noninteractive_output", "OpenRouter CLI login output"),
   rule("src/core/slack/install.zig", "run", /stdio_acquisition_write/, "noninteractive_output", "Slack CLI installation authorization prompt"),
   rule("src/core/shared/debug_trace.zig", "(?:writeLine|writeNoninteractiveStderr)", /debug_print/, "noninteractive_output", "opt-in tracing"),
   rule("tests/json-schema/corpus_runner.zig", "printLine", /stdio_acquisition/, "noninteractive_output", "JSON Schema corpus report output"),

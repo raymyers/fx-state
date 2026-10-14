@@ -994,6 +994,8 @@ fn handleRestoreSession(
                 credentials.missing_chatgpt_credential_message
             else if (effective_provider == .grok)
                 credentials.missing_grok_credential_message
+            else if (effective_provider == .openrouter)
+                credentials.missing_openrouter_credential_message
             else if (effective_provider == .configured)
                 "Configured provider authentication is unavailable"
             else
@@ -2307,6 +2309,7 @@ pub fn writeProviderConfigOption(
     try w.writeAll(",\"options\":[{\"value\":\"gateway\",\"name\":\"Vercel AI Gateway\"},{\"value\":\"codex\",\"name\":\"Codex subscription\"}");
     if (comptime !host_target.is_wasm) {
         try w.writeAll(",{\"value\":\"grok\",\"name\":\"Grok subscription\"}");
+        try w.writeAll(",{\"value\":\"openrouter\",\"name\":\"OpenRouter\"}");
         for (definitions) |definition| {
             try w.writeAll(",{\"value\":");
             try writeJsonStr(definition.id, w);

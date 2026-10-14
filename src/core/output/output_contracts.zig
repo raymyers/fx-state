@@ -77,6 +77,7 @@ pub const UsageSnapshot = struct {
         const s = self.snapshot;
         if (s.scope == .codex) return self.renderCodexText(alloc);
         if (s.scope == .grok) return self.renderGrokText(alloc);
+        if (s.scope == .openrouter) return self.renderOpenRouterText(alloc);
         const v = s.of(self.period);
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
@@ -239,6 +240,43 @@ pub const UsageSnapshot = struct {
         return try out.toOwnedSlice();
     }
 
+    /// An OpenRouter key: credits spent by period, and its limit.
+    fn renderOpenRouterText(self: UsageSnapshot, alloc: Allocator) ![]u8 {
+        const s = self.snapshot;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        try out.writer.writeAll("OpenRouter usage");
+        if (s.fetchedAtMs()) |ms| try writeUtcClock(&out.writer, ", updated ", ms);
+        try out.writer.writeByte('\n');
+        switch (s.status) {
+            .ready => {},
+            .fetching => if (s.openrouter_usage == null) try out.writer.writeAll("Fetching usage from OpenRouter.\n"),
+            .failed => |f| try writeUsageFailure(&out.writer, f, "OpenRouter"),
+            .unavailable => {},
+        }
+        const u = s.openrouter_usage orelse return try out.toOwnedSlice();
+        if (u.label) |label| {
+            try out.writer.writeAll("Key           ");
+            try writeTerminalSafe(&out.writer, alloc, label);
+            try out.writer.writeByte('\n');
+        }
+        try out.writer.print("Spend         ${d:.4} today, ${d:.4} this week, ${d:.4} this month\n", .{ u.used_daily orelse 0, u.used_weekly orelse 0, u.used_monthly orelse 0 });
+        try out.writer.print("All time      ${d:.4}\n", .{u.used});
+        try out.writer.writeAll("Limit         ");
+        if (u.limit) |limit| {
+            try out.writer.print("${d:.2}", .{limit});
+            if (u.limit_reset) |reset| {
+                try out.writer.writeAll(", resets ");
+                try writeTerminalSafe(&out.writer, alloc, reset);
+            }
+            if (u.limit_remaining) |remaining| try out.writer.print(", ${d:.2} left", .{remaining});
+        } else try out.writer.writeAll("none");
+        try out.writer.writeByte('\n');
+        if (u.free_tier) try out.writer.writeAll("Credits       none bought yet; free models only\n");
+        return try out.toOwnedSlice();
+    }
+
     pub fn renderJson(self: UsageSnapshot, alloc: Allocator) ![]u8 {
         const s = self.snapshot;
         const v = s.of(self.period);
@@ -248,6 +286,7 @@ pub const UsageSnapshot = struct {
         try out.writer.print("{{\"kind\":\"usage\",\"schema_version\":2,\"source\":\"{s}\",\"period\":", .{switch (s.scope orelse .member) {
             .codex => "chatgpt",
             .grok => "grok",
+            .openrouter => "openrouter",
             .member, .api_key => "ai_gateway",
         }});
         try std.json.Stringify.value(v.period.label(), .{}, &out.writer);
@@ -282,6 +321,8 @@ pub const UsageSnapshot = struct {
         try std.json.Stringify.value(s.codex_usage, .{}, &out.writer);
         try out.writer.writeAll(",\"grok\":");
         try std.json.Stringify.value(s.grok_usage, .{}, &out.writer);
+        try out.writer.writeAll(",\"openrouter\":");
+        try std.json.Stringify.value(s.openrouter_usage, .{}, &out.writer);
         try out.writer.writeByte('}');
         return try out.toOwnedSlice();
     }
@@ -571,7 +612,12 @@ fn writeTerminalSafe(writer: *std.Io.Writer, alloc: Allocator, raw: []const u8) 
 
 fn gatewayProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
     const source = auth.active_source orelse return auth.gateway_connected;
-    return auth.gateway_connected or (source != .chatgpt_subscription and source != .grok_subscription and source != .configured);
+    return auth.gateway_connected or model_provider.authorizesCredential(.gateway, source);
+}
+
+fn openRouterProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    const source = auth.active_source orelse return auth.openrouter_connected;
+    return auth.openrouter_connected or source.isOpenRouter();
 }
 
 fn chatGptProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
@@ -596,6 +642,11 @@ fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.Status
     if (grokProviderConnected(auth)) {
         if (wrote_provider) try writer.writeAll(", Grok");
         if (!wrote_provider) try writer.writeAll("Grok");
+        wrote_provider = true;
+    }
+    if (openRouterProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", OpenRouter");
+        if (!wrote_provider) try writer.writeAll("OpenRouter");
         wrote_provider = true;
     }
     if (!wrote_provider) try writer.writeAll("none");
@@ -804,7 +855,7 @@ pub const StatusSnapshot = struct {
     fn writeConnections(self: StatusSnapshot, writer: *std.Io.Writer) !void {
         if (self.provider == .configured and self.auth.active_source == .configured) {
             try writer.writeAll(self.provider.label());
-            if (!gatewayProviderConnected(self.auth) and !chatGptProviderConnected(self.auth) and !grokProviderConnected(self.auth)) return;
+            if (!gatewayProviderConnected(self.auth) and !chatGptProviderConnected(self.auth) and !grokProviderConnected(self.auth) and !openRouterProviderConnected(self.auth)) return;
             try writer.writeAll(", ");
         }
         try writeConnectedProvidersText(writer, self.auth);
@@ -875,6 +926,11 @@ pub const StatusSnapshot = struct {
             if (grokProviderConnected(self.auth)) {
                 if (wrote_provider) try writer.writeByte(',');
                 try std.json.Stringify.value("grok", .{}, writer);
+                wrote_provider = true;
+            }
+            if (openRouterProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("openrouter", .{}, writer);
             }
             try writer.writeByte(']');
         }
@@ -1149,6 +1205,7 @@ pub const ModelListSnapshot = struct {
             .gateway => "gateway",
             .codex => provider_catalog.label(.codex),
             .grok => provider_catalog.label(.grok),
+            .openrouter => provider_catalog.label(.openrouter),
             .configured => "configured provider",
         };
     }
@@ -3538,6 +3595,63 @@ test "usage text and JSON render a Grok plan's allowance and credits" {
     try std.testing.expectEqual(@as(f64, 42.7), grok.get("used_percent").?.float);
     try std.testing.expectEqualStrings("weekly", grok.get("period").?.string);
     try std.testing.expectEqualStrings("SuperGrok", grok.get("settings").?.object.get("plan").?.string);
+}
+
+test "usage text and JSON render an OpenRouter key's spend and limit" {
+    const alloc = std.testing.allocator;
+    var views: [usage.Period.all.len]usage.View = undefined;
+    for (&views, usage.Period.all) |*v, period| {
+        v.* = .{
+            .arena = std.heap.ArenaAllocator.init(alloc),
+            .period = period,
+            .models = &.{},
+            .totals = .{},
+            .today_current = false,
+            .finished_current = false,
+            .fetched_at_ms = null,
+            .budget = null,
+        };
+    }
+    const at = 20737 * std.time.ms_per_day + 8 * std.time.ms_per_hour + 14 * std.time.ms_per_min;
+    var snapshot: usage.Snapshot = .{
+        .arena = std.heap.ArenaAllocator.init(alloc),
+        .views = views,
+        .status = .ready,
+        .label = "OpenRouter key (OPENROUTER_API_KEY)",
+        .now_ms = at,
+        .scope = .openrouter,
+        .openrouter_usage = .{ .label = "fx", .used = 42.25, .used_daily = 0.5, .used_weekly = 3.75, .used_monthly = 12, .limit = 25, .limit_remaining = 13, .limit_reset = "monthly" },
+        .openrouter_at_ms = at,
+    };
+    defer snapshot.deinit();
+
+    const text = try (UsageSnapshot{ .snapshot = &snapshot }).render(alloc, .text);
+    defer alloc.free(text);
+    try std.testing.expectEqualStrings(
+        "OpenRouter usage, updated 08:14 UTC\n" ++
+            "Key           fx\n" ++
+            "Spend         $0.5000 today, $3.7500 this week, $12.0000 this month\n" ++
+            "All time      $42.2500\n" ++
+            "Limit         $25.00, resets monthly, $13.00 left\n",
+        text,
+    );
+    var unlimited = snapshot;
+    unlimited.openrouter_usage.?.limit = null;
+    unlimited.openrouter_usage.?.free_tier = true;
+    const unlimited_text = try (UsageSnapshot{ .snapshot = &unlimited }).render(alloc, .text);
+    defer alloc.free(unlimited_text);
+    try std.testing.expect(std.mem.find(u8, unlimited_text, "Limit         none\nCredits       none bought yet; free models only\n") != null);
+
+    const json = try (UsageSnapshot{ .snapshot = &snapshot }).render(alloc, .json);
+    defer alloc.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("openrouter", root.get("source").?.string);
+    try std.testing.expect(root.get("grok").? == .null);
+    const openrouter = root.get("openrouter").?.object;
+    try std.testing.expectEqual(@as(f64, 42.25), openrouter.get("used").?.float);
+    try std.testing.expectEqual(@as(i64, 13), openrouter.get("limit_remaining").?.integer);
 }
 
 test "usage text and JSON render a Codex plan's limits" {

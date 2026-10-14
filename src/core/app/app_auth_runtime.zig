@@ -11,6 +11,7 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
 const grok_oauth = @import("../auth/grok_oauth.zig");
+const openrouter_oauth = @import("../auth/openrouter_oauth.zig");
 const provider_catalog = @import("../auth/provider_catalog.zig");
 const auth_transition = @import("../auth/auth_transition.zig");
 const model_provider = @import("../config/model_provider.zig");
@@ -180,6 +181,7 @@ pub fn Runtime(comptime App: type) type {
                         .gateway => credentials.missing_interactive_credential_message,
                         .codex => credentials.missing_chatgpt_interactive_credential_message,
                         .grok => credentials.missing_grok_interactive_credential_message,
+                        .openrouter => credentials.missing_openrouter_interactive_credential_message,
                         .configured => "Configured provider authentication is unavailable. Check settings.json and its environment variable.",
                     },
                 }, true),
@@ -208,6 +210,8 @@ pub fn Runtime(comptime App: type) type {
                         "Configured provider authentication is unavailable. Check settings.json and its environment variable."
                     else if (provider == .grok)
                         credentials.missing_grok_interactive_credential_message
+                    else if (provider == .openrouter)
+                        credentials.missing_openrouter_interactive_credential_message
                     else
                         credentials.missing_chatgpt_interactive_credential_message,
                 }, true);
@@ -272,7 +276,7 @@ pub fn Runtime(comptime App: type) type {
                     try writeAuthNotice(app, .{
                         .topic = "",
                         .tone = .warning,
-                        .body = "usage: /logout [vercel|codex|grok]",
+                        .body = "usage: /logout [vercel|codex|grok|openrouter]",
                     });
                     return;
                 };
@@ -301,6 +305,31 @@ pub fn Runtime(comptime App: type) type {
                 return;
             }
             defer if (hold_turn_start) app.worker.releaseTurnStartHold();
+            if (logout_provider == .openrouter) {
+                const outcome = openrouter_oauth.logout() catch {
+                    try writeAuthNotice(app, .{
+                        .topic = "auth",
+                        .tone = .@"error",
+                        .body = "Could not durably remove the saved OpenRouter key. The current source is unchanged.",
+                    });
+                    return;
+                };
+                const changed = if (comptime @hasDecl(@TypeOf(app.auth), "reconcileAfterOpenRouterLogout"))
+                    try app.auth.reconcileAfterOpenRouterLogout(app.alloc)
+                else
+                    false;
+                applyCredentialChange(app, changed);
+                try writeAuthNotice(app, switch (outcome) {
+                    .deleted => .{ .topic = "auth", .tone = .neutral, .body = "Signed out of OpenRouter. " ++ openrouter_oauth.logout_notice },
+                    .missing => .{ .topic = "auth", .tone = .neutral, .body = "No saved OpenRouter key found." },
+                    .deleted_not_durable => .{ .topic = "auth", .tone = .warning, .body = "Signed out of OpenRouter, but could not confirm the profile directory update." },
+                });
+                // OPENROUTER_API_KEY keeps the provider usable after the saved key is gone.
+                if (provider_runtime.provider(app) == .openrouter and app.auth.pickerView().available_sources.contains(.openrouter_api_key)) {
+                    try startProviderSwitch(app, .openrouter, false, .manual, null);
+                } else try reconcileSubscriptionLogout(app, .openrouter);
+                return;
+            }
             if (logout_provider == .grok) {
                 const outcome = grok_oauth.logout(app.alloc, app.auth.oauthTransport()) catch {
                     try writeAuthNotice(app, .{
@@ -797,6 +826,10 @@ pub fn Runtime(comptime App: type) type {
                             try finishSubscriptionSignIn(app, .grok);
                             return;
                         },
+                        .openrouter => {
+                            try finishSubscriptionSignIn(app, .openrouter);
+                            return;
+                        },
                     }
                 },
             }
@@ -874,6 +907,9 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn applyApiKeySaveResult(app: *App, result: auth_runtime.ApiKeySaveResult) !void {
+            if (comptime @hasDecl(@TypeOf(app.auth), "apiKeySaveTarget")) {
+                if (app.auth.apiKeySaveTarget() == .openrouter) return applyOpenRouterKeySaveResult(app, result);
+            }
             switch (result) {
                 .empty => return,
                 .saved => |changed| {
@@ -1004,7 +1040,7 @@ pub fn Runtime(comptime App: type) type {
         fn rememberCredentialSource(app: *App, source: credentials.Source) void {
             // ChatGPT is selected by model route, not as a global Gateway
             // credential preference. Its saved session coexists independently.
-            if (source == .chatgpt_subscription or source == .grok_subscription) return;
+            if (source == .chatgpt_subscription or source == .grok_subscription or source.isOpenRouter()) return;
             if (comptime @hasDecl(App, "persistCredentialSourcePreference")) {
                 app.persistCredentialSourcePreference(source);
                 return;
@@ -1316,14 +1352,14 @@ pub fn Runtime(comptime App: type) type {
                     switch (target) {
                         .codex => try beginCodexSignInForProviderSwitch(app),
                         .grok => try beginGrokSignInForProviderSwitch(app),
-                        .gateway, .configured => {},
+                        .gateway, .openrouter, .configured => {},
                     }
                 }
-                if (target == .gateway or !request.allow_login) {
+                if (target == .gateway or target == .openrouter or !request.allow_login) {
                     try app.writeDomainNotice(.{
                         .topic = "provider",
                         .tone = .warning,
-                        .body = if (intent == .post_oauth) "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged." else if (target == .codex) "Run fx login codex, then try switching again." else if (target == .grok) "Run fx login grok, then try switching again." else credentials.missing_interactive_credential_message,
+                        .body = if (intent == .post_oauth) "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged." else if (target == .codex) "Run fx login codex, then try switching again." else if (target == .grok) "Run fx login grok, then try switching again." else if (target == .openrouter) credentials.missing_openrouter_interactive_credential_message else credentials.missing_interactive_credential_message,
                     }, true);
                 }
                 return false;
@@ -1690,6 +1726,55 @@ pub fn Runtime(comptime App: type) type {
             try beginSignIn(app, false);
         }
 
+        fn applyOpenRouterKeySaveResult(app: *App, result: auth_runtime.ApiKeySaveResult) !void {
+            const notice: types.SemanticNotice = switch (result) {
+                .empty => return,
+                .saved => {
+                    try app.auth.refreshSourceInventory(app.alloc);
+                    try app.writeDomainNotice(.{ .topic = "auth", .tone = .neutral, .body = "Saved the OpenRouter key." }, true);
+                    if (comptime provider_runtime.supported(App)) try switchProvider(app, .openrouter, false, .manual);
+                    return;
+                },
+                .gateway_refused => .{ .topic = "auth", .tone = .@"error", .body = "OpenRouter rejected that API key. Nothing was stored." },
+                .gateway_unavailable => .{ .topic = "auth", .tone = .@"error", .body = "Could not verify that API key with OpenRouter. Nothing was stored." },
+                .store_failed => .{ .topic = "auth", .tone = .@"error", .body = "Could not save the OpenRouter key. Nothing was stored." },
+                .reload_failed => .{ .topic = "auth", .tone = .@"error", .body = "Saved the OpenRouter key, but could not load it again." },
+            };
+            try app.writeDomainNotice(notice, true);
+        }
+
+        pub fn beginOpenRouterSignIn(app: *App) !void {
+            if (comptime provider_runtime.supported(App)) {
+                const decision = decideProviderSwitch(.{
+                    .current = provider_runtime.provider(app),
+                    .target = .openrouter,
+                    .target_credential_ready = false,
+                    .intent = .post_oauth,
+                    .stream_active = app.stream.active,
+                    .queued_prompts = app.worker.queuedPromptCount(),
+                });
+                if (decision == .busy) {
+                    try app.writeDomainNotice(.{
+                        .topic = "auth",
+                        .tone = .warning,
+                        .body = "OpenRouter sign-in is unavailable until active and queued work finishes.",
+                    }, true);
+                    return;
+                }
+            }
+            try app.flushBeforeBlockingExternalWork();
+            const started = app.auth.openOpenRouterSignInPickerFromRoot(app.alloc);
+            if (started catch |err| {
+                cancelPromptRetryAfterAuth(app);
+                debug_trace.logf("auth", "OpenRouter login failed err={s}", .{@errorName(err)});
+                try writeLoginError(app, .openrouter_login, err);
+                return;
+            }) {
+                app.shell.render_requests.request(.footer);
+                if (io_mod.getenv("FX_NO_OPEN_BROWSER") == null) try openSignInBrowser(app);
+            }
+        }
+
         fn validateTeamCredential(
             app: *App,
             candidate: credentials.Credential,
@@ -1921,9 +2006,9 @@ pub fn Runtime(comptime App: type) type {
                 .fx_login => try beginSignIn(app, false),
                 .chatgpt_subscription => try beginChatGptSignIn(app),
                 .grok_subscription => try beginGrokSignIn(app),
-                .vercel_oidc_token,
-                .ai_gateway_api_key,
+                .vercel_oidc_token, .ai_gateway_api_key, .openrouter_login => try beginOpenRouterSignIn(app),
                 .stored_key,
+                .openrouter_api_key,
                 .host_managed,
                 .configured,
                 => {},
@@ -2037,6 +2122,13 @@ pub fn Runtime(comptime App: type) type {
                     error.ChatGptAuthorizationFailed => .{ .topic = "auth", .tone = .@"error", .body = "Codex sign-in was denied. The current credential is unchanged." },
                     error.ChatGptLoginTimedOut, error.LoginTimedOut => .{ .topic = "auth", .tone = .warning, .body = "Codex sign-in expired. The current credential is unchanged; run /login to try again." },
                     else => .{ .topic = "auth", .tone = .@"error", .body = "Codex sign-in failed. The current credential is unchanged." },
+                }
+            else if (source == .openrouter_login)
+                switch (err) {
+                    error.OpenRouterAuthorizationDenied, error.OpenRouterStateMismatch => .{ .topic = "auth", .tone = .@"error", .body = "OpenRouter sign-in was denied. The current credential is unchanged." },
+                    error.OpenRouterCodeRejected, error.LoginTimedOut, error.ExpiredToken => .{ .topic = "auth", .tone = .warning, .body = "The OpenRouter sign-in code expired or was already used. The current credential is unchanged; run /login to try again." },
+                    error.OpenRouterKeyRejected => .{ .topic = "auth", .tone = .@"error", .body = "OpenRouter rejected the new key. The current credential is unchanged." },
+                    else => .{ .topic = "auth", .tone = .@"error", .body = "OpenRouter sign-in failed. The current credential is unchanged." },
                 }
             else if (source == .grok_subscription)
                 switch (err) {
@@ -2203,6 +2295,11 @@ const BusySignInAuth = struct {
         return true;
     }
 
+    fn openOpenRouterSignInPickerFromRoot(self: *BusySignInAuth, _: std.mem.Allocator) !bool {
+        self.start_count += 1;
+        return true;
+    }
+
     fn signInBrowserUrlAlloc(_: *BusySignInAuth, _: std.mem.Allocator) !?[]u8 {
         return null;
     }
@@ -2254,7 +2351,7 @@ test "interactive subscription sign-in rejects active and queued work before OAu
     };
 
     for (cases) |case| {
-        inline for ([_]model_provider.ProviderId{ .codex, .grok }) |provider| {
+        inline for ([_]model_provider.ProviderId{ .codex, .grok, .openrouter }) |provider| {
             var app: BusySignInApp = .{};
             defer app.deinit();
             app.stream.active = case.stream_active;
@@ -2263,6 +2360,7 @@ test "interactive subscription sign-in rejects active and queued work before OAu
             switch (provider) {
                 .codex => try Runtime(BusySignInApp).beginChatGptSignIn(&app),
                 .grok => try Runtime(BusySignInApp).beginGrokSignIn(&app),
+                .openrouter => try Runtime(BusySignInApp).beginOpenRouterSignIn(&app),
                 .gateway, .configured => unreachable,
             }
 
@@ -2426,6 +2524,10 @@ const TestAuth = struct {
     }
 
     fn openGrokSignInPickerFromRoot(self: *TestAuth, alloc: std.mem.Allocator) !bool {
+        return self.openSignInPicker(alloc);
+    }
+
+    fn openOpenRouterSignInPickerFromRoot(self: *TestAuth, alloc: std.mem.Allocator) !bool {
         return self.openSignInPicker(alloc);
     }
 

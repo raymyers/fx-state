@@ -3,6 +3,7 @@ const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const types = @import("../core/shared/types.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
 const tool_result_errors = @import("../core/tooling/tool_result_errors.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const tool_call_ids = @import("tool_call_ids.zig");
@@ -15,8 +16,13 @@ const text_utils = @import("../core/shared/text_utils.zig");
 const Allocator = std.mem.Allocator;
 
 pub const ToolChoiceMode = configured_provider.ToolChoiceMode;
+/// `openrouter` accepts reasoning effort and prompt-cache breakpoints, which
+/// generic chat completions endpoints would reject.
+pub const Dialect = enum { standard, openrouter };
+
 pub const Options = struct {
     tool_choice_mode: ToolChoiceMode = .omit,
+    dialect: Dialect = .standard,
     /// Borrowed only during serialization; includes the configured authority binding.
     provider: ?*const model_provider.ProviderId = null,
 };
@@ -48,7 +54,6 @@ pub const Error = error{
     InconsistentFinishReason,
     IncompleteStream,
     StreamClosed,
-    ProviderError,
     OutputTruncated,
     ContentFiltered,
     Refused,
@@ -166,9 +171,7 @@ fn validate_dynamic_schema(value: std.json.Value, depth: usize, budget: *SchemaB
 fn validate_request(request: stream_provider.RequestData) Error!void {
     try request.validatePrompt();
     configured_provider.validate_model_id(request.model) catch return error.InvalidModel;
-    const options = request.provider_options;
-    if (options.reasoning != null or options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
-    if (options.provider_order.len != 0) return error.UnsupportedProviderOption;
+    if (request.provider_options.fast) return error.UnsupportedProviderOption;
     if (request.response_format != null) return error.UnsupportedResponseFormat;
     // The vision tool runs through a separate provider request; inline image
     // content on user and tool-result messages serializes natively below.
@@ -396,6 +399,7 @@ fn write_replay(writer: *std.Io.Writer, alloc: Allocator, message: types.ChatMes
 /// Deadline enforcement and prepared-body reuse belong to the transport owner.
 pub fn build_request(alloc: Allocator, input: stream_provider.RequestData, options: Options) Error![]u8 {
     try validate_request(input);
+    if (options.dialect == .standard and (input.provider_options.reasoning != null or input.provider_options.prompt_caching or input.provider_options.provider_order.len != 0)) return error.UnsupportedProviderOption;
     var projected: ?[]types.ChatMessage = null;
     if (options.provider) |provider| {
         projected = try types.projectProviderReplay(alloc, input.messages, .{ .provider = provider.*, .model = input.model });
@@ -460,6 +464,7 @@ fn write_user_content_parts(
     writer: *std.Io.Writer,
     alloc: Allocator,
     message: types.ChatMessage,
+    breakpoint: bool,
 ) !void {
     try writer.writeByte('[');
     var wrote_part = false;
@@ -467,6 +472,7 @@ fn write_user_content_parts(
         if (content.len > 0) {
             try writer.writeAll("{\"type\":\"text\",\"text\":");
             try std.json.Stringify.value(content, .{}, writer);
+            if (breakpoint) try writer.writeAll("," ++ cache_control);
             try writer.writeByte('}');
             wrote_part = true;
         }
@@ -529,8 +535,15 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
     var pending_images: std.ArrayList(types.ToolImage) = .empty;
     defer pending_images.deinit(alloc);
     const lanes = [_][]const types.ChatMessage{ request.instructions, request.messages };
+    const breakpoints = if (options.dialect == .openrouter and request.provider_options.prompt_caching and explicit_cache_model(request.model))
+        cache_breakpoints(&lanes)
+    else
+        no_breakpoints;
+    var position: usize = 0;
     for (lanes) |lane| {
         for (lane) |message| {
+            const breakpoint = std.mem.findScalar(usize, &breakpoints, position) != null;
+            position += 1;
             // Source validation rejects empty assistants; only stripped replay can leave one here.
             if (message.role == .assistant and message.content == null and message.tool_calls.len == 0 and message.provider_replay == null) continue;
             if (message.role != .tool) try flush_tool_image_follow_up(writer, alloc, &count, &pending_names, &pending_images);
@@ -540,7 +553,11 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             try std.json.Stringify.value(@tagName(message.role), .{}, writer);
             try writer.writeAll(",\"content\":");
             if (message.role == .user and message.images.len != 0) {
-                try write_user_content_parts(writer, alloc, message);
+                try write_user_content_parts(writer, alloc, message, breakpoint);
+            } else if (breakpoint) {
+                try writer.writeAll("[{\"type\":\"text\",\"text\":");
+                try std.json.Stringify.value(message.content.?, .{}, writer);
+                try writer.writeAll("," ++ cache_control ++ "}]");
             } else {
                 try std.json.Stringify.value(message.content, .{}, writer);
             }
@@ -604,7 +621,68 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
         }
     }
     if (request.max_output_tokens) |limit| try writer.print(",\"max_tokens\":{d}", .{limit});
+    if (options.dialect == .openrouter) {
+        // provider_strict forbids OpenRouter from routing past the listed providers.
+        if (request.provider_options.provider_order.len != 0) {
+            try writer.writeAll(",\"provider\":{\"order\":");
+            try std.json.Stringify.value(request.provider_options.provider_order, .{}, writer);
+            if (request.provider_options.provider_strict) try writer.writeAll(",\"allow_fallbacks\":false");
+            try writer.writeByte('}');
+        }
+        if (request.provider_options.reasoning) |effort| {
+            try writer.writeAll(",\"reasoning\":{\"effort\":");
+            try std.json.Stringify.value(effort.label(), .{}, writer);
+            try writer.writeByte('}');
+        }
+    }
     try writer.writeByte('}');
+}
+
+const cache_control = "\"cache_control\":{\"type\":\"ephemeral\"}";
+/// Indexes across both lanes; unused slots hold a position no message has.
+const max_cache_breakpoints = 3;
+const no_breakpoints: [max_cache_breakpoints]usize = @splat(std.math.maxInt(usize));
+
+/// Anthropic, Gemini, and Qwen cache only behind explicit breakpoints; other
+/// families cache automatically and must not receive them.
+fn explicit_cache_model(model: []const u8) bool {
+    for ([_][]const u8{ "anthropic/", "google/", "qwen/" }) |prefix| {
+        if (std.mem.startsWith(u8, model, prefix)) return true;
+    }
+    return false;
+}
+
+/// The last system message and the last two user or tool messages with text,
+/// within Anthropic's limit of four breakpoints. OpenRouter documents cache
+/// control only on content blocks, so tool definitions get none.
+fn cache_breakpoints(lanes: []const []const types.ChatMessage) [max_cache_breakpoints]usize {
+    var result = no_breakpoints;
+    var total: usize = 0;
+    for (lanes) |lane| total += lane.len;
+    var conversation: usize = 0;
+    var system_found = false;
+    var position = total;
+    var lane_index = lanes.len;
+    while (lane_index > 0) {
+        lane_index -= 1;
+        const lane = lanes[lane_index];
+        var index = lane.len;
+        while (index > 0) {
+            index -= 1;
+            position -= 1;
+            const message = lane[index];
+            const content = message.content orelse continue;
+            if (content.len == 0) continue;
+            if (message.role == .system and !system_found) {
+                system_found = true;
+                result[0] = position;
+            } else if ((message.role == .user or message.role == .tool) and conversation < 2) {
+                conversation += 1;
+                result[conversation] = position;
+            }
+        }
+    }
+    return result;
 }
 
 pub const Limits = struct {
@@ -665,6 +743,8 @@ pub const Reducer = struct {
     reasoning_bytes: usize = 0,
     refusal_seen: bool = false,
     finish_reason: ?types.ProviderFinishReason = null,
+    failure_detail: ?[]u8 = null,
+    failure_cause: ?types.ProviderFailureCause = null,
     phase: enum { receiving, finished, done, closed } = .receiving,
     event_count: usize = 0,
     json_bytes: usize = 0,
@@ -693,6 +773,7 @@ pub const Reducer = struct {
         self.reasoning_details.bytes.deinit(self.alloc);
         if (self.generation_id) |id| self.alloc.free(id);
         if (self.response_model) |model| self.alloc.free(model);
+        if (self.failure_detail) |detail| self.alloc.free(detail);
         self.* = undefined;
     }
 
@@ -720,7 +801,13 @@ pub const Reducer = struct {
         };
         defer parsed.deinit();
         const root = try object(parsed.value);
-        if (non_null(root, "error") != null) return error.ProviderError;
+        // A provider error ends the stream whether or not [DONE] follows it.
+        if (reports_error(root)) {
+            try self.accept_failure(root);
+            self.finish_reason = .provider_error;
+            self.phase = .done;
+            return .{};
+        }
         try self.accept_identity(&self.generation_id, non_null(root, "id"), self.limits.identity_bytes);
         try self.accept_identity(&self.response_model, non_null(root, "model"), configured_provider.max_model_bytes);
         const choices_value = root.get("choices") orelse return error.InvalidChunk;
@@ -736,17 +823,21 @@ pub const Reducer = struct {
         if (try index_value(choice.get("index") orelse return error.InvalidChunk) != 0) return error.InvalidChunk;
         const delta = try object(choice.get("delta") orelse return error.InvalidChunk);
         if (self.phase == .finished) {
-            const reason = try string(non_null(choice, "finish_reason") orelse return error.InconsistentFinishReason);
-            if (!std.mem.eql(u8, reason, @tagName(self.finish_reason.?))) return error.InconsistentFinishReason;
+            // Trailing chunks (OpenRouter's usage chunk) may repeat the finish
+            // and carry empty fields, but never new output.
+            if (non_null(choice, "finish_reason")) |value| {
+                if (!std.mem.eql(u8, try string(value), @tagName(self.finish_reason.?))) return error.InconsistentFinishReason;
+            }
             var fields = delta.iterator();
             while (fields.next()) |field| {
+                const value = field.value_ptr.*;
                 if (std.mem.eql(u8, field.key_ptr.*, "role")) {
-                    if (field.value_ptr.* != .string or !std.mem.eql(u8, field.value_ptr.string, "assistant")) return error.InconsistentFinishReason;
-                } else if (std.mem.eql(u8, field.key_ptr.*, "content")) {
-                    if (field.value_ptr.* != .null and (field.value_ptr.* != .string or field.value_ptr.string.len != 0)) return error.InconsistentFinishReason;
-                } else return error.InconsistentFinishReason;
+                    if (value != .null and (value != .string or !std.mem.eql(u8, value.string, "assistant"))) return error.InconsistentFinishReason;
+                } else if (value != .null and !(value == .string and value.string.len == 0) and !(value == .array and value.array.items.len == 0)) {
+                    return error.InconsistentFinishReason;
+                }
             }
-            try self.accept_usage(non_null(root, "usage") orelse return error.InconsistentFinishReason, true);
+            if (non_null(root, "usage")) |usage| try self.accept_usage(usage, true);
             return .{};
         }
         if (non_null(delta, "role")) |role| if (!std.mem.eql(u8, try string(role), "assistant")) return error.InvalidChunk;
@@ -903,9 +994,16 @@ pub const Reducer = struct {
             .output_tokens = try token_count(fields, "completion_tokens"),
         };
         const incoming_total = try token_count(fields, "total_tokens");
+        const prompt_details = try optional_object(fields, "prompt_tokens_details");
+        const completion_details = try optional_object(fields, "completion_tokens_details");
+        // Detail counts and cost describe the whole response; the latest report wins.
         const usage = types.Usage{
             .input_tokens = incoming.input_tokens orelse self.usage.input_tokens,
             .output_tokens = incoming.output_tokens orelse self.usage.output_tokens,
+            .cache_read_tokens = (if (prompt_details) |details| try token_count(details, "cached_tokens") else null) orelse self.usage.cache_read_tokens,
+            .cache_write_tokens = (if (prompt_details) |details| try token_count(details, "cache_write_tokens") else null) orelse self.usage.cache_write_tokens,
+            .reasoning_tokens = (if (completion_details) |details| try token_count(details, "reasoning_tokens") else null) orelse self.usage.reasoning_tokens,
+            .cost = try cost_value(fields) orelse self.usage.cost,
         };
         const total = incoming_total orelse self.usage_total;
         var final_fields = self.usage_final_fields;
@@ -936,6 +1034,23 @@ pub const Reducer = struct {
         self.usage_final_fields = final_fields;
     }
 
+    fn accept_failure(self: *Reducer, root: std.json.ObjectMap) Error!void {
+        const fields: ?std.json.ObjectMap = if (non_null(root, "error")) |value| (if (value == .object) value.object else null) else null;
+        const code: ?[]const u8 = if (fields) |error_fields| if (non_null(error_fields, "code")) |value| switch (value) {
+            .string => |text| text,
+            .number_string => |text| text,
+            else => null,
+        } else null else null;
+        const message: ?[]const u8 = if (fields) |error_fields| if (non_null(error_fields, "message")) |value| (if (value == .string) value.string else null) else null else null;
+        const bounded_code = types.ModelFailureDiagnostic.init(code orelse "provider_error");
+        const bounded_message = types.ModelFailureDiagnostic.init(message orelse "Provider response failed");
+        var buffer: [2 * types.ModelFailureDiagnostic.max_bytes + 2]u8 = undefined;
+        const text = std.mem.print(&buffer, "{s}: {s}", .{ bounded_code.view(), bounded_message.view() }) catch unreachable;
+        const detail = types.ModelFailureDiagnostic.init(text);
+        self.failure_detail = try self.alloc.dupe(u8, detail.view());
+        self.failure_cause = failure_cause(code);
+    }
+
     /// Requires finish_reason followed by [DONE]. Length/filter/refusal are
     /// explicit errors, never executable partial calls or successful tool turns.
     /// Results use stream_provider.Result.deinit with this reducer's allocator.
@@ -946,6 +1061,17 @@ pub const Reducer = struct {
         if (self.phase != .done) return error.IncompleteStream;
         const reason = self.finish_reason.?;
         switch (reason) {
+            .provider_error => {
+                const generation_id = self.generation_id;
+                self.generation_id = null;
+                const detail = self.failure_detail;
+                self.failure_detail = null;
+                self.phase = .closed;
+                return .{ .completed = .{
+                    .completion = .{ .generation_id = generation_id, .finish_reason = reason, .usage = self.usage, .provider_failure_cause = self.failure_cause, .provider_failure_detail = detail },
+                    .ownership = .owned,
+                } };
+            },
             .length => return error.OutputTruncated,
             .content_filter => return error.ContentFiltered,
             .stop, .tool_calls => {},
@@ -999,6 +1125,30 @@ pub const Reducer = struct {
     }
 };
 
+/// OpenRouter reports a failure after a 200 status as a top-level error object,
+/// usually alongside finish_reason "error" on the only choice.
+fn reports_error(root: std.json.ObjectMap) bool {
+    if (non_null(root, "error") != null) return true;
+    const choices = non_null(root, "choices") orelse return false;
+    if (choices != .array or choices.array.items.len == 0 or choices.array.items[0] != .object) return false;
+    const reason = non_null(choices.array.items[0].object, "finish_reason") orelse return false;
+    return reason == .string and std.mem.eql(u8, reason.string, "error");
+}
+
+/// Codes are either OpenAI-style strings or HTTP statuses. Client errors other
+/// than timeouts and rate limits fail the same way when retried.
+fn failure_cause(code: ?[]const u8) ?types.ProviderFailureCause {
+    const text = code orelse return null;
+    if (std.mem.eql(u8, text, "rate_limit_exceeded")) return .rate_limited;
+    const status = std.fmt.parseInt(u16, text, 10) catch return null;
+    return switch (status) {
+        408 => null,
+        429 => .rate_limited,
+        400...407, 409...428, 430...499 => .non_retryable,
+        else => null,
+    };
+}
+
 fn object(value: std.json.Value) Error!std.json.ObjectMap {
     return if (value == .object) value.object else error.InvalidChunk;
 }
@@ -1029,6 +1179,22 @@ fn index_value(value: std.json.Value) Error!usize {
 fn token_count(fields: std.json.ObjectMap, key: []const u8) Error!?u64 {
     const value = non_null(fields, key) orelse return null;
     return std.math.cast(u64, try integer(value)) orelse error.InvalidChunk;
+}
+
+fn optional_object(fields: std.json.ObjectMap, key: []const u8) Error!?std.json.ObjectMap {
+    return try object(non_null(fields, key) orelse return null);
+}
+
+fn cost_value(fields: std.json.ObjectMap) Error!?f64 {
+    const value = non_null(fields, "cost") orelse return null;
+    const cost = switch (value) {
+        .integer => @as(f64, @floatFromInt(value.integer)),
+        .float => value.float,
+        .number_string => std.fmt.parseFloat(f64, value.number_string) catch return error.InvalidChunk,
+        else => return error.InvalidChunk,
+    };
+    if (!std.math.isFinite(cost) or cost < 0) return error.InvalidChunk;
+    return cost;
 }
 
 fn append_bounded(alloc: Allocator, destination: *std.ArrayList(u8), text: []const u8, limit: usize, failure: Error) Error!void {
@@ -2227,16 +2393,228 @@ test "chat completions terminal evidence and finish reasons are strict" {
     }
 }
 
+test "chat completions provider errors end the stream with their code and message" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { chunk: []const u8, detail: []const u8, cause: ?types.ProviderFailureCause = null }{
+        // OpenRouter's mid-stream shape: the error object and finish_reason "error" in one chunk.
+        .{ .chunk = "{\"id\":\"chat-1\",\"provider\":\"openai\",\"error\":{\"code\":\"server_error\",\"message\":\"Provider disconnected unexpectedly\"},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}", .detail = "server_error: Provider disconnected unexpectedly" },
+        .{ .chunk = "{\"error\":{\"code\":502,\"message\":\"Upstream failed\"}}", .detail = "502: Upstream failed" },
+        .{ .chunk = "{\"error\":{\"code\":429,\"message\":\"Slow down\"}}", .detail = "429: Slow down", .cause = .rate_limited },
+        .{ .chunk = "{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Slow down\"}}", .detail = "rate_limit_exceeded: Slow down", .cause = .rate_limited },
+        .{ .chunk = "{\"error\":{\"code\":402,\"message\":\"Insufficient credits\"}}", .detail = "402: Insufficient credits", .cause = .non_retryable },
+        .{ .chunk = "{\"error\":{\"code\":408,\"message\":\"Timed out\"}}", .detail = "408: Timed out" },
+        .{ .chunk = "{\"error\":{\"message\":\"bad request\"}}", .detail = "provider_error: bad request" },
+        .{ .chunk = "{\"error\":\"opaque\"}", .detail = "provider_error: Provider response failed" },
+        .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"error\"}]}", .detail = "provider_error: Provider response failed" },
+    };
+    for (cases) |case| {
+        var reducer = try Reducer.init(alloc, test_tool_request(), .{});
+        defer reducer.deinit();
+        try test_accept(&reducer, test_text);
+        try test_accept(&reducer, test_call);
+        try test_accept(&reducer, case.chunk);
+        var result = try reducer.finish(false);
+        defer result.deinit(alloc);
+        const completion = result.completed.completion;
+        try std.testing.expectEqual(types.ProviderFinishReason.provider_error, completion.finish_reason.?);
+        try std.testing.expectEqual(types.ProviderCompletionDisposition.provider_failure, types.classifyProviderCompletion(completion));
+        try std.testing.expectEqualStrings(case.detail, completion.provider_failure_detail.?);
+        try std.testing.expectEqual(case.cause, completion.provider_failure_cause);
+        try std.testing.expectEqualStrings("chat-1", completion.generation_id.?);
+        // Partial output was already streamed for display; a failed turn never executes calls.
+        try std.testing.expect(completion.content == null);
+        try std.testing.expectEqual(@as(usize, 0), completion.tool_calls.len);
+    }
+}
+
+test "chat completions consume_stream stops at a provider error without [DONE]" {
+    const alloc = std.testing.allocator;
+    var source = std.Io.Reader.fixed(
+        "data: {\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" ++
+            "data: {\"id\":\"chat-1\",\"error\":{\"code\":\"server_error\",\"message\":\"Provider disconnected\"},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}\n\n",
+    );
+    var cancel = std.atomic.Value(bool).init(false);
+    var result = try consume_stream(alloc, &source, test_request(), .{}, null, &cancel);
+    defer result.deinit(alloc);
+    try std.testing.expectEqual(types.ProviderFinishReason.provider_error, result.completed.completion.finish_reason.?);
+    try std.testing.expectEqualStrings("server_error: Provider disconnected", result.completed.completion.provider_failure_detail.?);
+}
+
+test "chat completions provider error results release allocations on failure" {
+    const Probe = struct {
+        fn run(alloc: Allocator) !void {
+            var reducer = try Reducer.init(alloc, test_request(), .{});
+            defer reducer.deinit();
+            try test_accept(&reducer, test_text);
+            try test_accept(&reducer, "{\"error\":{\"code\":502,\"message\":\"Upstream failed\"}}");
+            var result = try reducer.finish(false);
+            result.deinit(alloc);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Probe.run, .{});
+}
+
+test "chat completions usage keeps cost cache and reasoning details" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, test_text);
+    try test_accept(&reducer, test_stop);
+    // OpenRouter's trailing usage chunk.
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":30,\"total_tokens\":130,\"cost\":0.0012345,\"is_byok\":false,\"cost_details\":{\"upstream_inference_cost\":null},\"prompt_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":15,\"audio_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":12,\"image_tokens\":0}}}");
+    try test_accept(&reducer, "{\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":30,\"total_tokens\":130,\"prompt_tokens_details\":null}}");
+    try test_accept(&reducer, "[DONE]");
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    const usage = result.completed.completion.usage;
+    try std.testing.expectEqual(@as(?u64, 100), usage.input_tokens);
+    try std.testing.expectEqual(@as(?u64, 30), usage.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 80), usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, 15), usage.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, 12), usage.reasoning_tokens);
+    try std.testing.expectEqual(@as(?f64, 0.0012345), usage.cost);
+
+    for ([_][]const u8{
+        "{\"prompt_tokens\":1,\"cost\":-0.5}",
+        "{\"prompt_tokens\":1,\"cost\":\"0.5\"}",
+        "{\"prompt_tokens\":1,\"cost\":1e999}",
+        "{\"prompt_tokens\":1,\"prompt_tokens_details\":[]}",
+        "{\"prompt_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":-1}}",
+        "{\"prompt_tokens\":1,\"completion_tokens_details\":{\"reasoning_tokens\":1.5}}",
+    }) |invalid| {
+        var rejected = try Reducer.init(alloc, test_request(), .{});
+        defer rejected.deinit();
+        const chunk = try alloc.print("{{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"x\"}}}}],\"usage\":{s}}}", .{invalid});
+        defer alloc.free(chunk);
+        try std.testing.expectError(error.InvalidChunk, rejected.accept(chunk, false));
+    }
+}
+
+test "chat completions OpenRouter dialect sends reasoning effort and cache breakpoints" {
+    const alloc = std.testing.allocator;
+    const instructions = [_]types.ChatMessage{
+        .{ .role = .system, .content = "first rules" },
+        .{ .role = .system, .content = "last rules" },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "one" },
+        .{ .role = .assistant, .content = "reply" },
+        .{ .role = .user, .content = "two" },
+        .{ .role = .assistant, .content = "reply" },
+        .{ .role = .user, .content = "three" },
+    };
+    var request = test_request();
+    request.instructions = &instructions;
+    request.messages = &messages;
+    request.provider_options = .{ .reasoning = .literal("high"), .prompt_caching = true };
+    for ([_]struct { model: []const u8, breakpoints: usize }{
+        .{ .model = "anthropic/claude-sonnet-5.5", .breakpoints = 3 },
+        .{ .model = "google/gemini-4-argon", .breakpoints = 3 },
+        .{ .model = "qwen/qwen3-max", .breakpoints = 3 },
+        .{ .model = "openai/gpt-5", .breakpoints = 0 },
+    }) |case| {
+        request.model = case.model;
+        const body = try build_request(alloc, request, .{ .dialect = .openrouter });
+        defer alloc.free(body);
+        try std.testing.expectEqual(case.breakpoints, std.mem.count(u8, body, "\"cache_control\""));
+        try std.testing.expect(std.mem.endsWith(u8, body, ",\"reasoning\":{\"effort\":\"high\"}}"));
+        if (case.breakpoints != 0) {
+            for ([_][]const u8{ "last rules", "two", "three" }) |text| {
+                const marked = try alloc.print("{{\"type\":\"text\",\"text\":\"{s}\",\"cache_control\":{{\"type\":\"ephemeral\"}}}}", .{text});
+                defer alloc.free(marked);
+                try std.testing.expect(std.mem.find(u8, body, marked) != null);
+            }
+            try std.testing.expect(std.mem.find(u8, body, "\"content\":\"first rules\"") != null);
+            try std.testing.expect(std.mem.find(u8, body, "\"content\":\"one\"") != null);
+        }
+    }
+    request.model = "anthropic/claude-sonnet-5.5";
+    request.provider_options = .{};
+    const plain = try build_request(alloc, request, .{ .dialect = .openrouter });
+    defer alloc.free(plain);
+    try std.testing.expect(std.mem.find(u8, plain, "cache_control") == null and std.mem.find(u8, plain, "\"reasoning\"") == null);
+    const order = [_][]const u8{ "anthropic", "google-vertex" };
+    for ([_]bool{ false, true }) |strict| {
+        request.provider_options = .{ .provider_order = &order, .provider_strict = strict };
+        const routed = try build_request(alloc, request, .{ .dialect = .openrouter });
+        defer alloc.free(routed);
+        try std.testing.expect(std.mem.endsWith(u8, routed, if (strict)
+            ",\"provider\":{\"order\":[\"anthropic\",\"google-vertex\"],\"allow_fallbacks\":false}}"
+        else
+            ",\"provider\":{\"order\":[\"anthropic\",\"google-vertex\"]}}"));
+    }
+    for ([_]model_capabilities.ResolvedProviderOptions{ .{ .reasoning = .literal("high") }, .{ .prompt_caching = true }, .{ .provider_order = &order } }) |options| {
+        request.provider_options = options;
+        try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
+    }
+}
+
+test "chat completions replays recorded OpenRouter streams" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        name: []const u8,
+        wire: []const u8,
+        finish: types.ProviderFinishReason,
+        content: bool,
+        tool_calls: usize,
+        reasoning: bool,
+    }{
+        .{ .name = "anthropic text with reasoning", .wire = @embedFile("testdata/openrouter/anthropic-text-reasoning.sse"), .finish = .stop, .content = true, .tool_calls = 0, .reasoning = true },
+        .{ .name = "anthropic tool call", .wire = @embedFile("testdata/openrouter/anthropic-tool-reasoning.sse"), .finish = .tool_calls, .content = false, .tool_calls = 1, .reasoning = false },
+        .{ .name = "openai tool call with encrypted reasoning", .wire = @embedFile("testdata/openrouter/openai-tool-reasoning.sse"), .finish = .tool_calls, .content = false, .tool_calls = 1, .reasoning = true },
+        .{ .name = "gemini text", .wire = @embedFile("testdata/openrouter/gemini-text.sse"), .finish = .stop, .content = true, .tool_calls = 0, .reasoning = true },
+        .{ .name = "qwen tool call", .wire = @embedFile("testdata/openrouter/qwen-tool.sse"), .finish = .tool_calls, .content = false, .tool_calls = 1, .reasoning = true },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("recording: {s}\n", .{case.name});
+        var source = std.Io.Reader.fixed(case.wire);
+        var cancel = std.atomic.Value(bool).init(false);
+        var result = try consume_stream(alloc, &source, test_tool_request(), .{}, null, &cancel);
+        defer result.deinit(alloc);
+        const completion = result.completed.completion;
+        try std.testing.expectEqual(case.finish, completion.finish_reason.?);
+        try std.testing.expectEqual(case.content, completion.content != null);
+        try std.testing.expectEqual(case.tool_calls, completion.tool_calls.len);
+        for (completion.tool_calls) |call| {
+            try std.testing.expectEqualStrings("read_file", call.name);
+            try std.testing.expect(std.mem.find(u8, call.arguments_json, "notes.txt") != null);
+        }
+        try std.testing.expect(completion.usage.input_tokens.? > 0 and completion.usage.output_tokens.? > 0);
+        try std.testing.expect(completion.usage.cost.? > 0);
+        try std.testing.expectEqual(case.reasoning, completion.provider_state_json != null and std.mem.find(u8, completion.provider_state_json.?, "reasoning") != null);
+    }
+}
+
+test "chat completions accepts empty trailing chunks after the finish" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, test_text);
+    try test_accept(&reducer, test_stop);
+    for ([_][]const u8{
+        test_stop,
+        "{\"choices\":[{\"index\":0,\"delta\":{}}]}",
+        "{\"choices\":[{\"index\":0,\"delta\":{\"role\":null,\"content\":null,\"reasoning\":null,\"reasoning_details\":[],\"tool_calls\":null,\"refusal\":\"\"},\"finish_reason\":null}]}",
+        // OpenRouter's trailing usage chunk.
+        "{\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":null,\"reasoning_details\":[]},\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"logprobs\":null}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3,\"total_tokens\":13}}",
+    }) |chunk| try test_accept(&reducer, chunk);
+    try test_accept(&reducer, "[DONE]");
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("hello", result.completed.completion.content.?);
+    try std.testing.expectEqual(@as(?u64, 3), result.completed.completion.usage.output_tokens);
+}
+
 test "chat completions rejects malformed chunks contradictory identities and extra choices" {
     const alloc = std.testing.allocator;
     const cases = [_]struct { first: ?[]const u8 = null, chunk: []const u8, failure: Error }{
         .{ .chunk = "not JSON", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[],\"choices\":[]}", .failure = error.InvalidChunk },
-        .{ .chunk = "{\"error\":{\"message\":\"bad request\"}}", .failure = error.ProviderError },
         .{ .chunk = "{\"choices\":[{\"index\":1,\"delta\":{}}]}", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{}},{\"index\":1,\"delta\":{}}]}", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"unknown\"}]}", .failure = error.InvalidFinishReason },
-        .{ .first = test_stop, .chunk = test_stop, .failure = error.InconsistentFinishReason },
+        .{ .first = test_stop, .chunk = test_tools_finish, .failure = error.InconsistentFinishReason },
+        .{ .first = test_stop, .chunk = "{\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"more\"}}]}", .failure = error.InconsistentFinishReason },
         .{ .first = test_text, .chunk = "{\"id\":\"other\",\"choices\":[]}", .failure = error.ConflictingIdentity },
         .{ .first = test_text, .chunk = "{\"model\":\"other\",\"choices\":[]}", .failure = error.ConflictingIdentity },
         .{ .first = test_call, .chunk = "{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"other\"}]}}]}", .failure = error.ConflictingIdentity },
@@ -2516,7 +2894,11 @@ test "chat completions usage conflicts late errors and post terminal data cannot
         var reducer = try Reducer.init(alloc, test_request(), .{});
         defer reducer.deinit();
         try test_accept(&reducer, test_stop);
-        try std.testing.expectError(error.ProviderError, reducer.accept("{\"error\":{\"message\":\"late error\"}}", false));
+        try test_accept(&reducer, "{\"error\":{\"message\":\"late error\"}}");
+        var result = try reducer.finish(false);
+        defer result.deinit(alloc);
+        try std.testing.expectEqual(types.ProviderFinishReason.provider_error, result.completed.completion.finish_reason.?);
+        try std.testing.expectEqualStrings("provider_error: late error", result.completed.completion.provider_failure_detail.?);
     }
     {
         var reducer = try Reducer.init(alloc, test_request(), .{});

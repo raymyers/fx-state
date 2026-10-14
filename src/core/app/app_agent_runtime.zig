@@ -252,8 +252,8 @@ pub fn Runtime(comptime App: type) type {
                 .fast_mode = agent_settings.fast_mode,
                 .ultrafast_mode = agent_settings.ultrafast_mode,
                 .effort = agent_settings.effort,
-                .provider_order = if (selected_provider == .gateway) agent_settings.provider_order else &.{},
-                .provider_strict = selected_provider == .gateway and agent_settings.provider_strict,
+                .provider_order = if (selected_provider.routesByProviderOrder()) agent_settings.provider_order else &.{},
+                .provider_strict = selected_provider.routesByProviderOrder() and agent_settings.provider_strict,
                 .first_call_tool_choice = agent_settings.first_call_tool_choice,
                 .tool_registry = if (comptime @hasDecl(App, "toolRegistry")) app.toolRegistry() else .{},
                 .subagent_host = if (comptime @hasField(App, "session_persistence"))
@@ -1114,7 +1114,7 @@ pub fn Runtime(comptime App: type) type {
             const settings = app.worker.effectiveAgentTurnSettings();
             var provider_options = model_capabilities.resolveProviderOptionsForCapabilities(capabilities, settings.effort, settings.fast_mode);
             provider_options.prompt_caching = provider_capabilities.gateway_prompt_caching;
-            if (job.provider == .gateway) {
+            if (job.provider.routesByProviderOrder()) {
                 provider_options.provider_order = settings.provider_order;
                 provider_options.provider_strict = settings.provider_strict;
             }
@@ -1282,8 +1282,8 @@ pub fn Runtime(comptime App: type) type {
                 .fast_mode = job.agent_settings.fast_mode,
                 .ultrafast_mode = job.agent_settings.ultrafast_mode,
                 .effort = job.agent_settings.effort,
-                .provider_order = if (job.provider == .gateway) job.agent_settings.provider_order else &.{},
-                .provider_strict = job.provider == .gateway and job.agent_settings.provider_strict,
+                .provider_order = if (job.provider.routesByProviderOrder()) job.agent_settings.provider_order else &.{},
+                .provider_strict = job.provider.routesByProviderOrder() and job.agent_settings.provider_strict,
                 .first_call_tool_choice = job.agent_settings.first_call_tool_choice,
                 .workspace_root = workspace.root,
                 .access_scope = workspace.access_scope,

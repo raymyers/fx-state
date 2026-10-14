@@ -127,7 +127,7 @@ pub fn providerOptions(out: *[max_provider_options][]const u8) usize {
 
 pub fn providerMethods(id: model_provider.ProviderId) []const Method {
     return switch (id) {
-        .gateway => &.{ .oauth, .api_key },
+        .gateway, .openrouter => &.{ .oauth, .api_key },
         .codex, .grok, .configured => &.{},
     };
 }
@@ -136,8 +136,8 @@ pub fn providerMethods(id: model_provider.ProviderId) []const Method {
 /// method covers every gateway key origin, not just the environment variable.
 pub fn methodMatchesSource(method: Method, source: types.CredentialSource) bool {
     return switch (method) {
-        .oauth => source == .fx_login or source == .vercel_oidc_token,
-        .api_key => source == .ai_gateway_api_key or source == .stored_key,
+        .oauth => source == .fx_login or source == .vercel_oidc_token or source == .openrouter_login,
+        .api_key => source == .ai_gateway_api_key or source == .stored_key or source == .openrouter_api_key,
     };
 }
 

@@ -22,6 +22,8 @@ pub const Scope = enum {
     codex,
     /// A Grok plan: its allowance and credits, not AI Gateway reports.
     grok,
+    /// An OpenRouter key: its credit spend and limit.
+    openrouter,
 
     /// Whether usage comes from AI Gateway reports rather than a provider's
     /// plan.
@@ -200,7 +202,7 @@ pub fn reportPath(buf: []u8, scope: Scope, first: i64, last: i64) ![]const u8 {
     const filter = switch (scope) {
         .member => "metered_scope=user",
         .api_key => "api_key_id=self",
-        .codex, .grok => return error.NotAiGateway,
+        .codex, .grok, .openrouter => return error.NotAiGateway,
     };
     return std.mem.print(buf, "/v1/report?start_date={s}&end_date={s}&group_by=model&{s}", .{
         formatDay(&a, first),

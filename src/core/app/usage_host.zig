@@ -4,6 +4,7 @@
 const std = @import("std");
 const usage = @import("../../usage/usage.zig");
 const client = @import("../../gateway/client.zig");
+const openrouter_endpoints = @import("../config/openrouter_endpoints.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const oauth_session = @import("../auth/oauth_session.zig");
@@ -103,6 +104,13 @@ fn fromParts(
             .account_id = account,
             .label = "grok (xAI)",
         },
+        .openrouter_api_key, .openrouter_login => .{
+            .scope = .openrouter,
+            .bearer = bearer,
+            .team = null,
+            .subject = bearer,
+            .label = if (source == .openrouter_api_key) "OpenRouter key (OPENROUTER_API_KEY)" else "OpenRouter key (fx login)",
+        },
         else => null,
     };
 }
@@ -134,18 +142,21 @@ fn fetch(
     request: usage.Request,
     cancel: *std.atomic.Value(bool),
 ) usage.FetchError!usage.Response {
-    const origin = switch (request.service) {
-        .gateway => client.gatewayBaseUrl(),
-        .vercel_api => vercelApiOrigin(),
-        .chatgpt => chatgptOrigin(),
-        .grok => grokOrigin(),
-    };
     const account: client.UsageAccount = if (request.account_id) |id| switch (request.service) {
         .chatgpt => .{ .chatgpt = id },
         .grok => .{ .grok = id },
-        .gateway, .vercel_api => .none,
+        .gateway, .vercel_api, .openrouter => .none,
     } else .none;
-    const url = try alloc.print("{s}{s}", .{ origin, request.path });
+    const url = switch (request.service) {
+        .gateway => try alloc.print("{s}{s}", .{ client.gatewayBaseUrl(), request.path }),
+        .vercel_api => try alloc.print("{s}{s}", .{ vercelApiOrigin(), request.path }),
+        .chatgpt => try alloc.print("{s}{s}", .{ chatgptOrigin(), request.path }),
+        .grok => try alloc.print("{s}{s}", .{ grokOrigin(), request.path }),
+        .openrouter => openrouter_endpoints.apiUrl(alloc, request.path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Unavailable,
+        },
+    };
     defer alloc.free(url);
     const result = client.fetchUsageGet(alloc, request.bearer, request.team, account, url, cancel) catch |err| switch (err) {
         error.Cancelled => return error.Cancelled,

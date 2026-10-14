@@ -4,6 +4,7 @@ const acp_server = @import("acp/server.zig");
 const js_host_stream_provider = @import("gateway/js_host_stream_provider.zig");
 const host_openai_codex = @import("gateway/host_openai_codex.zig");
 const host_xai_grok = @import("gateway/host_xai_grok.zig");
+const host_openrouter = @import("gateway/host_openrouter.zig");
 const host_chat_completions = @import("gateway/host_chat_completions.zig");
 const model_provider = @import("core/config/model_provider.zig");
 const context_contract = @import("core/workspace/context_contract.zig");
@@ -91,6 +92,7 @@ const js_host_gateway_provider = gateway_provider.Provider{
 const codex_context = host_openai_codex.Context{ .transport = js_host_stream_provider.transport };
 // Mutable: it remembers the Grok client version between requests.
 var grok_context = host_xai_grok.Context{ .transport = js_host_stream_provider.transport };
+var openrouter_context = host_openrouter.Context{ .transport = js_host_stream_provider.transport };
 
 const js_host_provider_set = set: {
     var providers = provider_set.gateway_only(.{
@@ -114,6 +116,7 @@ const js_host_provider_set = set: {
         .agent_stream = host_xai_grok.provider(&grok_context),
         .model_catalog = host_xai_grok.modelCatalogProvider(&grok_context),
     };
+    providers.openrouter = host_openrouter.bundle(&openrouter_context);
     break :set providers;
 };
 
@@ -129,6 +132,7 @@ fn providerOverrideFromEnv(value: ?[]const u8, configured: ?*const host_chat_com
     if (std.mem.eql(u8, raw, "gateway")) return .gateway;
     if (std.mem.eql(u8, raw, "codex")) return .codex;
     if (std.mem.eql(u8, raw, "grok")) return .grok;
+    if (std.mem.eql(u8, raw, "openrouter")) return .openrouter;
     return error.InvalidProvider;
 }
 

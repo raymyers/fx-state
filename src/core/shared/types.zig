@@ -111,8 +111,16 @@ pub const CredentialSource = enum {
     stored_key,
     chatgpt_subscription,
     grok_subscription,
+    /// OPENROUTER_API_KEY.
+    openrouter_api_key,
+    /// A key saved by `fx login openrouter`.
+    openrouter_login,
     host_managed,
     configured,
+
+    pub fn isOpenRouter(self: CredentialSource) bool {
+        return self == .openrouter_api_key or self == .openrouter_login;
+    }
 };
 
 pub const DirectCredentialLease = struct {
@@ -1596,6 +1604,8 @@ pub const Usage = struct {
     cache_read_tokens: ?u64 = null,
     cache_write_tokens: ?u64 = null,
     reasoning_tokens: ?u64 = null,
+    /// Provider-reported charge in USD credits, such as OpenRouter's `usage.cost`.
+    cost: ?f64 = null,
 };
 
 /// Absolute per-turn token totals. Input covers only user-submitted prompt text

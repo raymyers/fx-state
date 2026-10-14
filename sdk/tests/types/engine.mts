@@ -294,3 +294,21 @@ export async function grokEngine(): Promise<FxEngine> {
   await createFxEngine({ provider: "grok", model, credentials: ({ provider }) => tokenStore.load(provider) });
   return engine;
 }
+
+// An OpenRouter engine on the host's OpenRouter key, given once or per request.
+declare const openRouterKeys: { load(sessionId?: string): Promise<string> };
+export async function openRouterEngine(): Promise<FxEngine> {
+  const engine = await createFxEngine({ provider: "openrouter", apiKey: "sk-or-key" });
+  await createFxEngine({
+    provider: "openrouter",
+    model: "openai/gpt-5",
+    credentials: async ({ provider, sessionId }) => ({ apiKey: provider === "openrouter" ? await openRouterKeys.load(sessionId) : "" }),
+  });
+  // @ts-expect-error OpenRouter needs a key, given as apiKey or credentials()
+  await createFxEngine({ provider: "openrouter" });
+  // @ts-expect-error OpenRouter takes apiKey or credentials(), not both
+  await createFxEngine({ provider: "openrouter", apiKey: "sk-or-key", credentials: () => ({ apiKey: "sk-or-key" }) });
+  // @ts-expect-error an OpenRouter key is never refreshed
+  await createFxEngine({ provider: "openrouter", apiKey: "sk-or-key", onCredentials: () => {} });
+  return engine;
+}

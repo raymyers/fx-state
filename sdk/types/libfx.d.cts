@@ -535,6 +535,24 @@ export type FxCodexProvider = FxSubscriptionProvider<"codex">;
 /** Runs on a Grok plan instead of AI Gateway. */
 export type FxGrokProvider = FxSubscriptionProvider<"grok">;
 
+/** Runs on OpenRouter instead of AI Gateway. The key goes only to OpenRouter's chat URL, never to the engine. Without `model`, the agent runs `anthropic/claude-sonnet-5.5`. */
+export type FxOpenRouterProvider = {
+  provider: "openrouter";
+  onCredentials?: undefined;
+  refreshLock?: undefined;
+} & (
+  | {
+    /** The OpenRouter API key. Without it and `credentials`, libfx throws a `TypeError` with code `FX_OPENROUTER_KEY_REQUIRED`. */
+    apiKey: string;
+    credentials?: undefined;
+  }
+  | {
+    apiKey?: undefined;
+    /** The OpenRouter API key for each request, asked for in whichever process runs the turn. */
+    credentials: (request: { provider: "openrouter"; sessionId?: string }) => FxApiKeyCredentials | Promise<FxApiKeyCredentials>;
+  }
+);
+
 /** What libfx knows about a model a custom provider serves. Unset fields are unknown. */
 export interface FxCustomProviderModel {
   contextWindow?: number;
@@ -546,7 +564,7 @@ export interface FxCustomProviderModel {
 
 /** A server that speaks OpenAI Chat Completions, such as a local model server or a router. */
 export interface FxCustomProviderDefinition {
-  /** Names the provider to `credentials()`: a letter, then letters, digits, `_` or `-`, at most 64 characters. Not `gateway`, `codex` or `grok`. */
+  /** Names the provider to `credentials()`: a letter, then letters, digits, `_` or `-`, at most 64 characters. Not `gateway`, `codex`, `grok` or `openrouter`. */
   name: string;
   /** The API prefix: requests go to `{baseUrl}/chat/completions`. HTTPS, or HTTP on localhost. */
   baseUrl: string;
@@ -578,6 +596,7 @@ export type FxEngineOptions = FxSharedOptions<FxEngineEvent> & FxModelChoice & F
     /** The AI Gateway credential, unused by this provider's turns. */
     apiKey?: string | undefined;
   })
+  | FxOpenRouterProvider
 ) & {
   /** The id for AI Gateway session affinity: 1 to 255 letters, digits, `.`, `_`, or `-`. Give a restored session the id it had before. */
   sessionId?: string | null;
@@ -608,11 +627,15 @@ export declare function memory(options?: MemoryOptions): Durability;
 // Durable agents
 
 /** Options for `createFxAgent()`. */
-export type FxAgentOptions = Omit<FxSharedOptions<FxAgentEvent>, "tools"> & FxModelChoice & (FxGatewayProvider | FxCodexProvider | FxGrokProvider | FxCustomProvider) & {
+export type FxAgentOptions = Omit<FxSharedOptions<FxAgentEvent>, "tools"> & FxModelChoice & (
+  | ((FxGatewayProvider | FxCodexProvider | FxGrokProvider | FxCustomProvider) & {
+    /** The AI Gateway credential. Without it, libfx uses `AI_GATEWAY_API_KEY`, then on Vercel the deployment's OIDC token. */
+    apiKey?: string | undefined;
+  })
+  | FxOpenRouterProvider
+) & {
   /** Every host tool sets `idempotent`. */
   tools?: FxAgentTools;
-  /** The AI Gateway credential. Without it, libfx uses `AI_GATEWAY_API_KEY`, then on Vercel the deployment's OIDC token. */
-  apiKey?: string | undefined;
   /** Where sessions live. Without it, libfx picks one from the environment. */
   durability?: Durability | undefined;
   /** Checkpoint bytes the agent's new sessions start from. */

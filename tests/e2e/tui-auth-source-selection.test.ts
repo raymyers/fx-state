@@ -20,6 +20,8 @@ import { FX_BIN, REPO_ROOT, runFx, providerVersionTestEnv } from "../evals/eval-
 import { fakeResponsesTitleDefault, TITLE_GENERATION_MARKER } from "./tmux-helpers";
 import { readTapeFrames } from "./render-lab/tape";
 import { equivalentPngEncodings, solidPng } from "./fixtures/image-encoding";
+import { openRouterCompletion } from "./fixtures/chat-completions";
+import { createOpenRouterFixture, openRouterCatalog } from "./fixtures/openrouter";
 import {
   FAKE_GATEWAY_MODEL,
   fakeGatewayFinalText,
@@ -3070,6 +3072,158 @@ for (const provider of ["codex", "grok"] as const) {
     expect(readFileSync(stderrPath, "utf8")).toBe("");
   }, TIMEOUT);
 }
+
+tmuxTest(
+  "the provider picker switches to OpenRouter with its environment key",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-openrouter-picker-"));
+    stderrPath = join(home, "stderr.log");
+    gateway = startFakeGateway();
+    const requests: Array<{ authorization: string | null; model: string }> = [];
+    const openrouter = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (new URL(request.url).pathname === "/api/v1/models") return openRouterCatalog();
+        const body = await request.json();
+        // A new session's title is a separate side call.
+        if (JSON.stringify(body.messages).includes("Generate a short title")) return openRouterCompletion(body.model, "Fixture Title");
+        requests.push({ authorization: request.headers.get("authorization"), model: body.model });
+        return openRouterCompletion(body.model, "OPENROUTER_PICKER_RESPONSE");
+      },
+    });
+    try {
+      session = await startFx(home, stderrPath, gateway, undefined, undefined, {
+        FX_MODEL: undefined,
+        OPENROUTER_API_KEY: "sk-or-picker",
+        FX_E2E_OPENROUTER_BASE_URL: `http://127.0.0.1:${openrouter.port}/api/v1`,
+      });
+      await session.waitForComposer(TIMEOUT);
+      await openProviderPicker(session);
+      await session.waitForPane((pane) => pane.includes("openrouter"), TIMEOUT);
+      await session.sendText("openrouter");
+      await session.waitForText("Switched to OpenRouter with anthropic/claude-sonnet-5.5.", TIMEOUT);
+      expect(JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8")).provider).toBe("openrouter");
+      await session.sendText("Answer from OpenRouter.");
+      await session.waitForText("OPENROUTER_PICKER_RESPONSE", TIMEOUT);
+      expect(requests).toEqual([{ authorization: "Bearer sk-or-picker", model: "anthropic/claude-sonnet-5.5" }]);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      openrouter.stop(true);
+    }
+  },
+  60_000,
+);
+
+tmuxTest(
+  "an OpenRouter model missing from the catalog is noted once",
+  async () => {
+    const f = createOpenRouterFixture();
+    stderrPath = join(f.home, "stderr.log");
+    gateway = startFakeGateway();
+    try {
+      session = await startFx(f.home, stderrPath, gateway, undefined, undefined, {
+        FX_PROVIDER: "openrouter",
+        FX_MODEL: "missing/model",
+        OPENROUTER_API_KEY: "sk-or-test-key",
+        FX_E2E_OPENROUTER_BASE_URL: f.env.FX_E2E_OPENROUTER_BASE_URL,
+      }, f.workspace);
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("/model");
+      await session.waitForText("OpenRouter's model list doesn't include missing/model", TIMEOUT);
+      await session.sendKeys("Escape");
+      await session.sendText("/model");
+      await Bun.sleep(500);
+      const scrollback = await session.captureFullScrollback();
+      expect(scrollback.split("OpenRouter's model list doesn't include missing/model").length - 1).toBe(1);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      await session?.kill();
+      session = null;
+      f.close();
+    }
+  },
+  60_000,
+);
+
+tmuxTest(
+  "the /login picker signs in to OpenRouter with the browser and /logout removes the key",
+  async () => {
+    const f = createOpenRouterFixture();
+    stderrPath = join(f.home, "stderr.log");
+    gateway = startFakeGateway();
+    try {
+      session = await startFx(f.home, stderrPath, gateway, undefined, undefined, {
+        FX_MODEL: undefined,
+        FX_E2E_OPENROUTER_BASE_URL: f.env.FX_E2E_OPENROUTER_BASE_URL,
+        FX_E2E_OPENROUTER_AUTH_URL: f.env.FX_E2E_OPENROUTER_AUTH_URL,
+      }, f.workspace);
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("/login");
+      await session.waitForPane((pane) => pane.includes("openrouter"), TIMEOUT);
+      await session.sendText("openrouter");
+      await session.waitForPane((pane) => pane.includes("sign in with browser") && pane.includes("paste API key"), TIMEOUT);
+      await session.sendText("oauth");
+      await completeDisplayedSubscriptionLogin(session, "Authorize with OpenRouter", `${f.env.FX_E2E_OPENROUTER_AUTH_URL}?`);
+      await session.waitForText("Switched to OpenRouter with anthropic/claude-sonnet-5.5.", TIMEOUT);
+      const saved = JSON.parse(readFileSync(join(f.home, ".fx", "openrouter-auth.json"), "utf8"));
+      expect(saved.api_key).toBe("sk-or-v1-issued-1");
+      await session.sendText("Answer from OpenRouter.");
+      await session.waitForText("openrouter reply", TIMEOUT);
+      expect(f.requests.filter((request) => request.path === "/api/v1/chat/completions").at(-1)!.authorization).toBe("Bearer sk-or-v1-issued-1");
+
+      await session.sendText("/logout openrouter");
+      await session.waitForText("Signed out of OpenRouter. The key stays active on OpenRouter", TIMEOUT);
+      await session.waitForText("Switched to Vercel AI Gateway", TIMEOUT);
+      expect(existsSync(join(f.home, ".fx", "openrouter-auth.json"))).toBe(false);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      await session?.kill();
+      session = null;
+      f.close();
+    }
+  },
+  90_000,
+);
+
+tmuxTest(
+  "the /login picker saves a pasted OpenRouter key only after OpenRouter accepts it",
+  async () => {
+    const f = createOpenRouterFixture();
+    stderrPath = join(f.home, "stderr.log");
+    gateway = startFakeGateway();
+    try {
+      session = await startFx(f.home, stderrPath, gateway, undefined, undefined, {
+        FX_MODEL: undefined,
+        FX_E2E_OPENROUTER_BASE_URL: f.env.FX_E2E_OPENROUTER_BASE_URL,
+      }, f.workspace);
+      await session.waitForComposer(TIMEOUT);
+      for (const key of ["sk-or-v1-unknown", "sk-or-test-key"]) {
+        await session.sendText("/login");
+        await session.waitForPane((pane) => pane.includes("openrouter"), TIMEOUT);
+        await session.sendText("openrouter");
+        await session.waitForPane((pane) => pane.includes("paste API key"), TIMEOUT);
+        await session.sendText("api-key");
+        await session.waitForText("Paste or type a key", TIMEOUT);
+        await session.sendLiteralText(key);
+        await session.sendKeys("Enter");
+        if (key === "sk-or-v1-unknown") {
+          await session.waitForText("OpenRouter rejected that API key. Nothing was stored.", TIMEOUT);
+          expect(existsSync(join(f.home, ".fx", "openrouter-auth.json"))).toBe(false);
+        }
+      }
+      await session.waitForText("Saved the OpenRouter key.", TIMEOUT);
+      await session.waitForText("Switched to OpenRouter with anthropic/claude-sonnet-5.5.", TIMEOUT);
+      expect(JSON.parse(readFileSync(join(f.home, ".fx", "openrouter-auth.json"), "utf8")).api_key).toBe("sk-or-test-key");
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      await session?.kill();
+      session = null;
+      f.close();
+    }
+  },
+  90_000,
+);
 
 async function startFxWithoutAuth(
   testHome: string,

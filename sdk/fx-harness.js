@@ -29,7 +29,9 @@ export function fxHarness({ createEngine, defaultApiKey = async () => undefined 
       ...(checkpoint === undefined ? {} : { seed: snapshotOf(checkpointBytesOf(checkpoint)) }),
       settings: sessionSettings,
       async open({ sessionId, store, context, settings, durability, ready }) {
-        const apiKey = engineOptions.apiKey ?? await defaultApiKey(durability);
+        // The default is a Gateway credential; OpenRouter's apiKey is OpenRouter's
+        // own key, so a Gateway key must never stand in for it.
+        const apiKey = engineOptions.apiKey ?? (engineOptions.provider === "openrouter" ? undefined : await defaultApiKey(durability));
         const engine = await createEngine({
           ...withSettings(engineOptions, settings),
           ...(apiKey === undefined ? {} : { apiKey }),

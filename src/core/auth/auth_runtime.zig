@@ -5,6 +5,8 @@ const auth_transition = @import("auth_transition.zig");
 const credentials = @import("credentials.zig");
 const chatgpt_oauth = @import("chatgpt_oauth.zig");
 const grok_oauth = @import("grok_oauth.zig");
+const openrouter_oauth = @import("openrouter_oauth.zig");
+const openrouter_session = @import("openrouter_session.zig");
 const host = @import("../hosts/host.zig");
 const host_target = @import("../hosts/target.zig");
 const login_flow = @import("login_flow.zig");
@@ -36,7 +38,14 @@ const credential_source_order = [_]credentials.Source{
     .stored_key,
     .chatgpt_subscription,
     .grok_subscription,
+    .openrouter_api_key,
+    .openrouter_login,
 };
+
+/// Sources that can authorize Gateway, as opposed to another provider's login or key.
+fn gatewaySource(source: credentials.Source) bool {
+    return model_provider.authorizesCredential(.gateway, source);
+}
 
 const SourceProbeFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!bool;
 const CredentialLoaderFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!?credentials.Credential;
@@ -563,11 +572,17 @@ pub const ApiKeySaveOutcome = union(enum) {
     }
 };
 
+/// Which provider a typed key belongs to. The inline `/provider` picker sets
+/// it; the staged hub always enters a Gateway key.
+pub const ApiKeyTarget = enum { gateway, openrouter };
+
 const ApiKeySaveDeps = struct {
     ctx: ?*anyopaque = null,
     validator: api_key_validator.Provider = api_key_validator.unavailable_provider,
     store: StoredKeyStoreFn = storeUnavailableSecret,
     loader: CredentialLoaderFn = loadCredentialSource,
+    /// The source the stored key reloads as.
+    source: credentials.Source = .stored_key,
 };
 
 /// The whole save sequence with no runtime state, so outcome behaviour can be
@@ -582,12 +597,12 @@ fn performApiKeySave(alloc: Allocator, key: []const u8, deps: ApiKeySaveDeps) Ap
         debug_trace.logf("auth", "api key save failed step=store err={s}", .{@errorName(err)});
         return .store_failed;
     };
-    const loaded = deps.loader(deps.ctx, alloc, .stored_key) catch |err| {
+    const loaded = deps.loader(deps.ctx, alloc, deps.source) catch |err| {
         debug_trace.logf("auth", "api key save failed step=reload err={s}", .{@errorName(err)});
         return .reload_failed;
     };
     const credential = loaded orelse return .reload_failed;
-    if (credential.source != .stored_key) {
+    if (credential.source != deps.source) {
         var wrong = credential;
         wrong.deinit(alloc);
         return .reload_failed;
@@ -1503,6 +1518,7 @@ pub const StatusSnapshot = struct {
     gateway_connected: bool = false,
     chatgpt_connected: bool = false,
     grok_connected: bool = false,
+    openrouter_connected: bool = false,
     /// The active credential is past its refresh deadline. Distinct from `refreshable`,
     /// which answers whether this source type can refresh at all.
     expired: bool = false,
@@ -1563,6 +1579,10 @@ pub const StatusSnapshot = struct {
                 .cli => credentials.missing_grok_credential_message,
                 .interactive => credentials.missing_grok_interactive_credential_message,
             },
+            .openrouter_api_key, .openrouter_login => switch (surface) {
+                .cli => credentials.missing_openrouter_credential_message,
+                .interactive => credentials.missing_openrouter_interactive_credential_message,
+            },
             .host_managed => automatic_help,
             .configured => "The configured provider credential is unavailable. Check its auth environment variable in settings.json; no other provider was selected.",
         };
@@ -1613,6 +1633,13 @@ pub fn loadStatusSnapshotForProvider(
         error.OutOfMemory => return err,
         else => false,
     };
+    var openrouter_connected = false;
+    for ([_]credentials.Source{ .openrouter_api_key, .openrouter_login }) |source| {
+        openrouter_connected = openrouter_connected or credentials.sourceExists(alloc, secret_store, source) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => false,
+        };
+    }
     // Resolves in `.stored` mode: a diagnostic must not refresh, because refreshing
     // rewrites the session file and performs network I/O. It reports the expired state
     // instead of repairing it.
@@ -1641,9 +1668,9 @@ pub fn loadStatusSnapshotForProvider(
         },
     };
     const resolved_source = if (resolution.credential) |credential| credential.source else null;
-    var gateway_connected = resolved_source != null and resolved_source != .chatgpt_subscription and resolved_source != .grok_subscription and resolved_source != .configured;
-    const gateway_probe_required = (provider != null and (provider.? == .codex or provider.? == .grok)) or
-        resolved_source == .chatgpt_subscription or resolved_source == .grok_subscription;
+    var gateway_connected = resolved_source != null and gatewaySource(resolved_source.?);
+    const gateway_probe_required = (provider != null and (provider.? == .codex or provider.? == .grok or provider.? == .openrouter)) or
+        resolved_source == .chatgpt_subscription or resolved_source == .grok_subscription or (resolved_source != null and resolved_source.?.isOpenRouter());
     if (gateway_probe_required) {
         for ([_]credentials.Source{ .vercel_oidc_token, .ai_gateway_api_key, .fx_login, .stored_key }) |source| {
             if (credentials.sourceExists(alloc, secret_store, source) catch |err| switch (err) {
@@ -1669,6 +1696,7 @@ pub fn loadStatusSnapshotForProvider(
             .gateway_connected = gateway_connected,
             .chatgpt_connected = chatgpt_connected,
             .grok_connected = grok_connected,
+            .openrouter_connected = openrouter_connected,
             .expired = expired,
         };
     }
@@ -1680,6 +1708,7 @@ pub fn loadStatusSnapshotForProvider(
         .gateway_connected = gateway_connected,
         .chatgpt_connected = chatgpt_connected,
         .grok_connected = grok_connected,
+        .openrouter_connected = openrouter_connected,
     };
 }
 
@@ -1754,6 +1783,9 @@ pub const Runtime = struct {
     /// panel, so the composer keeps showing which path the user walked.
     api_key_inline: bool = false,
     api_key_returns_to_root: bool = false,
+    api_key_target: ApiKeyTarget = .gateway,
+    /// The target of the save in flight or last finished.
+    api_key_save_target: ApiKeyTarget = .gateway,
     api_key_save: ApiKeySaveRuntime = .{},
     inventory_refresh_task: ?*InventoryRefreshTask = null,
     prompt_credential_refresh_task: ?*PromptCredentialRefreshTask = null,
@@ -1803,7 +1835,7 @@ pub const Runtime = struct {
         auth_mode: credentials.AuthMode,
     ) void {
         comptime {
-            if (@typeInfo(Self).@"struct".field_names.len != 33) {
+            if (@typeInfo(Self).@"struct".field_names.len != 35) {
                 @compileError("update Runtime.initInto for the changed field set");
             }
         }
@@ -1835,6 +1867,8 @@ pub const Runtime = struct {
         storage.api_key_input = .empty;
         storage.api_key_inline = false;
         storage.api_key_returns_to_root = false;
+        storage.api_key_target = .gateway;
+        storage.api_key_save_target = .gateway;
         storage.api_key_save = .{};
         storage.inventory_refresh_task = null;
         storage.prompt_credential_refresh_task = null;
@@ -1976,6 +2010,7 @@ pub const Runtime = struct {
             .gateway_connected = true,
             .chatgpt_connected = true,
             .grok_connected = true,
+            .openrouter_connected = true,
         };
         const gateway_connected = self.source_inventory.contains(.vercel_oidc_token) or
             self.source_inventory.contains(.ai_gateway_api_key) or
@@ -1983,6 +2018,7 @@ pub const Runtime = struct {
             self.source_inventory.contains(.stored_key);
         const chatgpt_connected = self.source_inventory.contains(.chatgpt_subscription);
         const grok_connected = self.source_inventory.contains(.grok_subscription);
+        const openrouter_connected = self.source_inventory.contains(.openrouter_api_key) or self.source_inventory.contains(.openrouter_login);
         const credential = self.selected_credential orelse return .{
             .required_source = requestedSource(provider, preferred),
             .failure = if (self.credential_failure) |episode|
@@ -1994,6 +2030,7 @@ pub const Runtime = struct {
             .gateway_connected = gateway_connected,
             .chatgpt_connected = chatgpt_connected,
             .grok_connected = grok_connected,
+            .openrouter_connected = openrouter_connected,
         };
         return .{
             .active_source = credential.source,
@@ -2001,6 +2038,7 @@ pub const Runtime = struct {
             .gateway_connected = gateway_connected,
             .chatgpt_connected = chatgpt_connected,
             .grok_connected = grok_connected,
+            .openrouter_connected = openrouter_connected,
             .expired = credential.needsRefreshAt(now_ms),
         };
     }
@@ -2337,7 +2375,7 @@ pub const Runtime = struct {
         self.picker_stage = .switch_credential;
         const active_source = self.credentialSource();
         self.picker_selection = if (active_source) |source|
-            if (source != .chatgpt_subscription and source != .grok_subscription and self.source_inventory.contains(source))
+            if (gatewaySource(source) and self.source_inventory.contains(source))
                 .{ .source = source }
             else
                 self.pickerView().choiceAt(0)
@@ -2361,14 +2399,24 @@ pub const Runtime = struct {
         self.picker_stage = .api_key;
         self.picker_selection = null;
         self.api_key_returns_to_root = returns_to_root;
+        self.api_key_target = .gateway;
     }
 
     /// Opens the key field for the inline `/provider` picker. The stage is the
     /// same one the staged panel uses, so entry, saving, and cancelling all
     /// keep working; only the rendering differs.
     pub fn openApiKeyPickerInline(self: *Self, alloc: Allocator) void {
+        self.openApiKeyPickerInlineFor(alloc, .gateway);
+    }
+
+    pub fn openApiKeyPickerInlineFor(self: *Self, alloc: Allocator, target: ApiKeyTarget) void {
         self.openApiKeyPickerWithParent(alloc, false);
         self.api_key_inline = true;
+        self.api_key_target = target;
+    }
+
+    pub fn apiKeySaveTarget(self: *const Self) ApiKeyTarget {
+        return self.api_key_save_target;
     }
 
     pub fn apiKeyInlineActive(self: *const Self) bool {
@@ -2410,6 +2458,11 @@ pub const Runtime = struct {
         return self.openSignInPickerWithParent(alloc, true, .grok_subscription);
     }
 
+    pub fn openOpenRouterSignInPickerFromRoot(self: *Self, alloc: Allocator) !bool {
+        if (comptime host_target.is_wasm) return error.OpenRouterSignInUnavailable;
+        return self.openSignInPickerWithParent(alloc, false, .openrouter_login);
+    }
+
     pub fn openGrokSignInPickerForProviderSwitch(self: *Self, alloc: Allocator) !bool {
         if (comptime host_target.is_wasm) return error.GrokOAuthUnavailable;
         return self.openSignInPickerWithParent(alloc, false, .grok_subscription);
@@ -2426,6 +2479,7 @@ pub const Runtime = struct {
             .fx_login => try self.sign_in_flow.start(alloc, self.oauth_transport),
             .chatgpt_subscription => try chatgpt_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport),
             .grok_subscription => try grok_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport),
+            .openrouter_login => try openrouter_oauth.startSignIn(&self.sign_in_flow, alloc, self.oauth_transport, .browser),
             else => return error.InvalidSignInSource,
         };
         if (!started) return false;
@@ -2541,12 +2595,23 @@ pub const Runtime = struct {
     /// store write can block for seconds on a locked keychain, and the gateway
     /// check is a network round trip; neither may run on the event loop.
     pub fn beginApiKeySave(self: *Self, alloc: Allocator) ApiKeySaveStart {
-        return self.beginApiKeySaveWithDeps(alloc, .{
-            .ctx = self,
-            .validator = self.api_key_validator,
-            .store = storeRuntimeSecret,
-            .loader = loadRuntimeCredentialSource,
-        });
+        const target = self.api_key_target;
+        if (self.apiKeyEntryActive() and self.api_key_input.items.len > 0 and !self.api_key_save.isSaving()) self.api_key_save_target = target;
+        return switch (target) {
+            .gateway => self.beginApiKeySaveWithDeps(alloc, .{
+                .ctx = self,
+                .validator = self.api_key_validator,
+                .store = storeRuntimeSecret,
+                .loader = loadRuntimeCredentialSource,
+            }),
+            .openrouter => self.beginApiKeySaveWithDeps(alloc, .{
+                .ctx = self,
+                .validator = .{ .context = self, .validate_fn = validateOpenRouterKey },
+                .store = storeOpenRouterKey,
+                .loader = loadRuntimeCredentialSource,
+                .source = .openrouter_login,
+            }),
+        };
     }
 
     fn beginApiKeySaveWithDeps(self: *Self, alloc: Allocator, deps: ApiKeySaveDeps) ApiKeySaveStart {
@@ -2587,6 +2652,9 @@ pub const Runtime = struct {
                 var owned = credential.*;
                 outcome = .reload_failed;
                 defer owned.deinit(alloc);
+                // An OpenRouter key cannot authorize the current provider; the
+                // caller switches to OpenRouter, which loads it again.
+                if (self.api_key_save_target == .openrouter) break :blk .{ .saved = false };
                 break :blk .{ .saved = self.adoptCredential(alloc, &owned) };
             },
         };
@@ -2968,7 +3036,7 @@ pub const Runtime = struct {
 
         try self.refreshSourceInventoryWithProbe(alloc, ctx, probe);
         for (credential_source_order) |source| {
-            if (source == .chatgpt_subscription or source == .grok_subscription) continue;
+            if (!gatewaySource(source)) continue;
             if (!self.source_inventory.contains(source)) continue;
             if (try self.selectSourceWithLoader(alloc, source, ctx, loader) != null) {
                 return self.credentialSource() != previous;
@@ -2994,6 +3062,18 @@ pub const Runtime = struct {
     pub fn reconcileAfterGrokLogout(self: *Self, alloc: Allocator) !bool {
         const was_available = self.source_inventory.contains(.grok_subscription);
         const was_active = self.credentialSource() == .grok_subscription;
+        if (was_active) {
+            if (self.selected_credential) |*credential| credential.deinit(alloc);
+            self.selected_credential = null;
+            self.credential_failure = null;
+        }
+        try self.refreshSourceInventory(alloc);
+        return was_active or was_available;
+    }
+
+    pub fn reconcileAfterOpenRouterLogout(self: *Self, alloc: Allocator) !bool {
+        const was_available = self.source_inventory.contains(.openrouter_login);
+        const was_active = self.credentialSource() == .openrouter_login;
         if (was_active) {
             if (self.selected_credential) |*credential| credential.deinit(alloc);
             self.selected_credential = null;
@@ -3030,7 +3110,7 @@ pub const Runtime = struct {
         if (!login_was_active) return false;
 
         for (credential_source_order) |source| {
-            if (source == .chatgpt_subscription or source == .grok_subscription) continue;
+            if (!gatewaySource(source)) continue;
             if (!self.source_inventory.contains(source)) continue;
             if (try self.selectSourceWithLoader(alloc, source, ctx, loader) != null) return true;
             self.source_inventory.remove(source);
@@ -3173,6 +3253,19 @@ fn storeRuntimeSecret(raw: ?*anyopaque, alloc: Allocator, value: []const u8) !vo
     return self.secret_store.store(alloc, value);
 }
 
+fn validateOpenRouterKey(raw: ?*anyopaque, alloc: Allocator, key: []const u8) api_key_validator.Result {
+    const self: *Runtime = @ptrCast(@alignCast(raw.?));
+    openrouter_oauth.validateKey(alloc, self.oauth_transport, key) catch |err| return switch (err) {
+        error.OpenRouterKeyRejected, error.InvalidOpenRouterKey => .refused,
+        else => .unavailable,
+    };
+    return .accepted;
+}
+
+fn storeOpenRouterKey(_: ?*anyopaque, alloc: Allocator, key: []const u8) !void {
+    try openrouter_session.save(alloc, key);
+}
+
 fn storeUnavailableSecret(_: ?*anyopaque, _: Allocator, _: []const u8) !void {
     return error.StoredKeyWriteFailed;
 }
@@ -3196,7 +3289,7 @@ fn takeDisplayTeam(alloc: Allocator, credential: *credentials.Credential) ?[]u8 
 fn gatewaySourceCount(sources: SourceSet) usize {
     var count: usize = 0;
     for (credential_source_order) |source| {
-        if (source == .chatgpt_subscription or source == .grok_subscription or !sources.contains(source)) continue;
+        if (!gatewaySource(source) or !sources.contains(source)) continue;
         count += 1;
     }
     return count;
@@ -3205,7 +3298,7 @@ fn gatewaySourceCount(sources: SourceSet) usize {
 fn gatewaySourceAtIndex(sources: SourceSet, wanted_index: usize) ?credentials.Source {
     var index: usize = 0;
     for (credential_source_order) |source| {
-        if (source == .chatgpt_subscription or source == .grok_subscription or !sources.contains(source)) continue;
+        if (!gatewaySource(source) or !sources.contains(source)) continue;
         if (index == wanted_index) return source;
         index += 1;
     }

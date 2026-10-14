@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createConfiguredProviderFixture, completion as configuredCompletion } from "./fixtures/chat-completions";
+import { createConfiguredProviderFixture, completion as configuredCompletion, openRouterCompletion } from "./fixtures/chat-completions";
+import { openRouterCatalog } from "./fixtures/openrouter";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
@@ -10331,6 +10332,61 @@ describe("acp: model catalog authentication", () => {
         }
       }, TIMEOUT);
     }
+  }
+
+  for (const keyed of [true, false]) {
+    test(`provider selection activates OpenRouter ${keyed ? "with its environment key" : "only when a key exists"}`, async () => {
+      const root = createIsolatedRoot("fx-acp-openrouter-");
+      const gateway = startFakeGateway([]);
+      const requests: Array<{ authorization: string | null; model: string }> = [];
+      const openrouter = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request) {
+          if (new URL(request.url).pathname === "/api/v1/models") return openRouterCatalog();
+          const body = await request.json();
+          // A new session's title is a separate side call.
+          if (JSON.stringify(body.messages).includes("Generate a short title")) return openRouterCompletion(body.model, "Fixture Title");
+          requests.push({ authorization: request.headers.get("authorization"), model: body.model });
+          return openRouterCompletion(body.model, "ACP_OPENROUTER_RESPONSE");
+        },
+      });
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: {
+            ...fakeGatewayEnv(root, gateway),
+            FX_DISABLE_KEYCHAIN: "1",
+            FX_SOUND: "0",
+            OPENROUTER_API_KEY: keyed ? "sk-or-acp" : undefined,
+            FX_E2E_OPENROUTER_BASE_URL: `http://127.0.0.1:${openrouter.port}/api/v1`,
+          },
+        });
+        await client.request("initialize", { protocolVersion: 1 }, 1);
+        const created = await client.request("session/new", { mcpServers: [] }, 2) as any;
+        const providerOption = created.result.configOptions.find((option: any) => option.id === "provider");
+        expect(providerOption.options).toContainEqual({ value: "openrouter", name: "OpenRouter" });
+        const changed = await client.request("session/set_config_option", { configId: "provider", value: "openrouter" }, 3) as any;
+        if (!keyed) {
+          expect(changed.error.message).toContain("Run fx login openrouter or set OPENROUTER_API_KEY");
+          expect(requests).toHaveLength(0);
+          return;
+        }
+        expect(changed.error).toBeUndefined();
+        expect(changed.result.configOptions.find((option: any) => option.id === "provider").currentValue).toBe("openrouter");
+        const prompt = await runPrompt(client, "Answer from OpenRouter.", TIMEOUT);
+        expect(prompt.promptResult.result.stopReason).toBe("end_turn");
+        expect(JSON.stringify(prompt.messages)).toContain("ACP_OPENROUTER_RESPONSE");
+        expect(requests).toEqual([{ authorization: "Bearer sk-or-acp", model: "anthropic/claude-sonnet-5.5" }]);
+        expect(gateway.requests).toHaveLength(0);
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        openrouter.stop(true);
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
+      }
+    }, TIMEOUT);
   }
 
   test("an open ACP connection refreshes subscription model options before selection", async () => {

@@ -203,12 +203,15 @@ pub const SignInCompletion = union(enum) {
     vercel: TeamSelection,
     chatgpt: chatgpt_session.Session,
     grok: grok_session.Session,
+    /// A validated OpenRouter API key. Owned; zeroed on release.
+    openrouter: []u8,
 
     pub fn deinit(self: *SignInCompletion, alloc: Allocator) void {
         switch (self.*) {
             .vercel => |*selection| selection.deinit(alloc),
             .chatgpt => |*session| session.deinit(alloc),
             .grok => |*session| session.deinit(alloc),
+            .openrouter => |key| secret.zeroAndFree(alloc, key),
         }
         self.* = .{ .vercel = .{} };
     }
@@ -217,6 +220,53 @@ pub const SignInCompletion = union(enum) {
         const completion = self.*;
         self.* = .{ .vercel = .{} };
         return completion;
+    }
+};
+
+/// Reads one pasted authorization code from stdin without blocking, so a CLI
+/// sign-in can wait for a browser callback and a pasted code at once.
+pub const StdinManualCodeReader = struct {
+    buffer: [max_manual_code_bytes]u8 = undefined,
+    len: usize = 0,
+    closed: bool = false,
+
+    pub fn poll(self: *StdinManualCodeReader) !?[]const u8 {
+        if (self.closed) return null;
+        var fds = [_]std.posix.pollfd{.{
+            .fd = std.posix.STDIN_FILENO,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = try std.posix.poll(&fds, 0);
+        if (ready == 0 or
+            (fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) == 0) return null;
+
+        var chunk: [512]u8 = undefined;
+        defer @memset(&chunk, 0);
+        const read_len = try std.posix.read(std.posix.STDIN_FILENO, &chunk);
+        if (read_len == 0) {
+            self.closed = true;
+            return if (self.len == 0) null else self.buffer[0..self.len];
+        }
+        const line_end = std.mem.findScalar(u8, chunk[0..read_len], '\n') orelse read_len;
+        if (line_end > self.buffer.len - self.len) return error.AuthorizationCodeTooLong;
+        @memcpy(self.buffer[self.len..][0..line_end], chunk[0..line_end]);
+        self.len += line_end;
+        if (line_end < read_len) {
+            self.closed = true;
+            return self.buffer[0..self.len];
+        }
+        return null;
+    }
+
+    pub fn clear(self: *StdinManualCodeReader) void {
+        @memset(self.buffer[0..self.len], 0);
+        self.len = 0;
+    }
+
+    pub fn deinit(self: *StdinManualCodeReader) void {
+        @memset(&self.buffer, 0);
+        self.* = undefined;
     }
 };
 
@@ -680,7 +730,7 @@ fn completeSignIn(
 fn saveSignIn(_: ?*anyopaque, alloc: Allocator, completion: SignInCompletion) !void {
     const session = switch (completion) {
         .vercel => |selection| selection.session orelse return LoginError.NoSession,
-        .chatgpt, .grok => return error.InvalidSignInCompletion,
+        .chatgpt, .grok, .openrouter => return error.InvalidSignInCompletion,
     };
     try oauth_session.saveNewSession(alloc, session);
 }
