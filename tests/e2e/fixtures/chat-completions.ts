@@ -19,6 +19,19 @@ export function toolCompletion(model: string, name: string, args: unknown, callI
   return new Response(chunks.map(value => `data: ${JSON.stringify(value)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
 }
 
+// OpenRouter's stream shape: keep-alive comments, null fields in deltas, and a
+// trailing usage chunk that repeats the finish with an empty delta.
+export function openRouterCompletion(model: string, text = "local reply") {
+  const choice = (delta: unknown, finish_reason: string | null) => ({ index: 0, delta, finish_reason, native_finish_reason: finish_reason, logprobs: null });
+  const chunks = [
+    { id: "gen-local", model, choices: [choice({ role: "assistant", content: text, reasoning: null }, null)] },
+    { id: "gen-local", model, choices: [choice({ role: "assistant", content: "", reasoning: null }, "stop")] },
+    { id: "gen-local", model, choices: [choice({ role: "assistant", content: "", reasoning: null }, "stop")], usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } },
+  ];
+  const wire = ": OPENROUTER PROCESSING\n\n" + chunks.map(value => `data: ${JSON.stringify(value)}\n\n: OPENROUTER PROCESSING\n\n`).join("") + "data: [DONE]\n\n";
+  return new Response(wire, { headers: { "content-type": "text/event-stream" } });
+}
+
 // OpenRouter reports a failure after the 200 status as an error object with
 // finish_reason "error", and may close the stream without [DONE].
 export function streamError(model: string, code: string | number, message: string, text = "") {

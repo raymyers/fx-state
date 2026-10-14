@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FX_BIN, runFx } from "../evals/eval-helpers";
-import { completion, streamError, toolCompletion, createConfiguredProviderFixture as fixture } from "./fixtures/chat-completions";
+import { completion, openRouterCompletion, streamError, toolCompletion, createConfiguredProviderFixture as fixture } from "./fixtures/chat-completions";
 
 async function withReasoning(response: Response, ...deltas: Record<string, unknown>[]) {
   const prefix = deltas.map(delta => `data: ${JSON.stringify({ choices: [{ index: 0, delta }] })}\n\n`).join("");
@@ -142,6 +142,19 @@ describe("configured providers", () => {
       expect(f.requests).toHaveLength(1);
     } finally { f.close(); }
   });
+
+  test("OpenRouter keep-alive comments and a repeated trailing finish complete the turn", async () => {
+    const f = fixture(body => openRouterCompletion(body.model));
+    try {
+      const result = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      expect(result.stderr).toBe("");
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.output).toBe("local reply");
+      expect(parsed.usage).toMatchObject({ input_tokens: 12, output_tokens: 3 });
+      expect(f.requests).toHaveLength(1);
+    } finally { f.close(); }
+  }, 25000);
 
   test("a mid-stream provider error stops without retry and reports its code and message", async () => {
     const f = fixture(body => streamError(body.model, 402, "Insufficient credits", "partial "));

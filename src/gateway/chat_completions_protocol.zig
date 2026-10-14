@@ -744,17 +744,21 @@ pub const Reducer = struct {
         if (try index_value(choice.get("index") orelse return error.InvalidChunk) != 0) return error.InvalidChunk;
         const delta = try object(choice.get("delta") orelse return error.InvalidChunk);
         if (self.phase == .finished) {
-            const reason = try string(non_null(choice, "finish_reason") orelse return error.InconsistentFinishReason);
-            if (!std.mem.eql(u8, reason, @tagName(self.finish_reason.?))) return error.InconsistentFinishReason;
+            // Trailing chunks (OpenRouter's usage chunk) may repeat the finish
+            // and carry empty fields, but never new output.
+            if (non_null(choice, "finish_reason")) |value| {
+                if (!std.mem.eql(u8, try string(value), @tagName(self.finish_reason.?))) return error.InconsistentFinishReason;
+            }
             var fields = delta.iterator();
             while (fields.next()) |field| {
+                const value = field.value_ptr.*;
                 if (std.mem.eql(u8, field.key_ptr.*, "role")) {
-                    if (field.value_ptr.* != .string or !std.mem.eql(u8, field.value_ptr.string, "assistant")) return error.InconsistentFinishReason;
-                } else if (std.mem.eql(u8, field.key_ptr.*, "content")) {
-                    if (field.value_ptr.* != .null and (field.value_ptr.* != .string or field.value_ptr.string.len != 0)) return error.InconsistentFinishReason;
-                } else return error.InconsistentFinishReason;
+                    if (value != .null and (value != .string or !std.mem.eql(u8, value.string, "assistant"))) return error.InconsistentFinishReason;
+                } else if (value != .null and !(value == .string and value.string.len == 0) and !(value == .array and value.array.items.len == 0)) {
+                    return error.InconsistentFinishReason;
+                }
             }
-            try self.accept_usage(non_null(root, "usage") orelse return error.InconsistentFinishReason, true);
+            if (non_null(root, "usage")) |usage| try self.accept_usage(usage, true);
             return .{};
         }
         if (non_null(delta, "role")) |role| if (!std.mem.eql(u8, try string(role), "assistant")) return error.InvalidChunk;
@@ -2348,6 +2352,26 @@ test "chat completions provider error results release allocations on failure" {
     try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Probe.run, .{});
 }
 
+test "chat completions accepts empty trailing chunks after the finish" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, test_text);
+    try test_accept(&reducer, test_stop);
+    for ([_][]const u8{
+        test_stop,
+        "{\"choices\":[{\"index\":0,\"delta\":{}}]}",
+        "{\"choices\":[{\"index\":0,\"delta\":{\"role\":null,\"content\":null,\"reasoning\":null,\"reasoning_details\":[],\"tool_calls\":null,\"refusal\":\"\"},\"finish_reason\":null}]}",
+        // OpenRouter's trailing usage chunk.
+        "{\"id\":\"chat-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":null,\"reasoning_details\":[]},\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"logprobs\":null}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3,\"total_tokens\":13}}",
+    }) |chunk| try test_accept(&reducer, chunk);
+    try test_accept(&reducer, "[DONE]");
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("hello", result.completed.completion.content.?);
+    try std.testing.expectEqual(@as(?u64, 3), result.completed.completion.usage.output_tokens);
+}
+
 test "chat completions rejects malformed chunks contradictory identities and extra choices" {
     const alloc = std.testing.allocator;
     const cases = [_]struct { first: ?[]const u8 = null, chunk: []const u8, failure: Error }{
@@ -2356,7 +2380,8 @@ test "chat completions rejects malformed chunks contradictory identities and ext
         .{ .chunk = "{\"choices\":[{\"index\":1,\"delta\":{}}]}", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{}},{\"index\":1,\"delta\":{}}]}", .failure = error.InvalidChunk },
         .{ .chunk = "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"unknown\"}]}", .failure = error.InvalidFinishReason },
-        .{ .first = test_stop, .chunk = test_stop, .failure = error.InconsistentFinishReason },
+        .{ .first = test_stop, .chunk = test_tools_finish, .failure = error.InconsistentFinishReason },
+        .{ .first = test_stop, .chunk = "{\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"more\"}}]}", .failure = error.InconsistentFinishReason },
         .{ .first = test_text, .chunk = "{\"id\":\"other\",\"choices\":[]}", .failure = error.ConflictingIdentity },
         .{ .first = test_text, .chunk = "{\"model\":\"other\",\"choices\":[]}", .failure = error.ConflictingIdentity },
         .{ .first = test_call, .chunk = "{\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"other\"}]}}]}", .failure = error.ConflictingIdentity },
