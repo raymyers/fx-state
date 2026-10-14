@@ -7,6 +7,7 @@ const std = @import("std");
 const report = @import("report.zig");
 const codex = @import("codex.zig");
 const grok = @import("grok.zig");
+const openrouter = @import("openrouter.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -64,12 +65,19 @@ pub const Grok = struct {
     value: grok.Usage,
 };
 
+/// An OpenRouter key's spend and limit, from a fetch that started at `at_ms`.
+pub const OpenRouter = struct {
+    at_ms: i64,
+    value: openrouter.Usage,
+};
+
 pub const Entry = struct {
     today: ?Today = null,
     finished: ?Finished = null,
     budget: ?Budget = null,
     codex: ?Codex = null,
     grok: ?Grok = null,
+    openrouter: ?OpenRouter = null,
 };
 
 /// An entry and the arena that owns its slices.
@@ -99,6 +107,7 @@ pub fn merge(stored: Entry, fetched: Entry, now_ms: i64) Entry {
         .budget = notAfter(Budget, stored.budget, now_ms),
         .codex = notAfter(Codex, stored.codex, now_ms),
         .grok = notAfter(Grok, stored.grok, now_ms),
+        .openrouter = notAfter(OpenRouter, stored.openrouter, now_ms),
     };
     return .{
         .today = newer(Today, s.today, fetched.today, todayKey),
@@ -106,6 +115,7 @@ pub fn merge(stored: Entry, fetched: Entry, now_ms: i64) Entry {
         .budget = newer(Budget, s.budget, fetched.budget, budgetKey),
         .codex = mergeCodex(s.codex, fetched.codex),
         .grok = mergeGrok(s.grok, fetched.grok),
+        .openrouter = newer(OpenRouter, s.openrouter, fetched.openrouter, openRouterKey),
     };
 }
 
@@ -131,6 +141,10 @@ fn mergeGrok(stored: ?Grok, fetched: ?Grok) ?Grok {
 
 fn grokKey(g: Grok) i64 {
     return g.at_ms;
+}
+
+fn openRouterKey(o: OpenRouter) i64 {
+    return o.at_ms;
 }
 
 /// The newer limits; a fetch whose activity or breakdown request failed
@@ -174,6 +188,7 @@ const Wire = struct {
     budget: ?Budget = null,
     codex: ?Codex = null,
     grok: ?Grok = null,
+    openrouter: ?OpenRouter = null,
 };
 
 pub fn encode(alloc: Allocator, identity: Identity, entry: Entry) ![]u8 {
@@ -187,6 +202,7 @@ pub fn encode(alloc: Allocator, identity: Identity, entry: Entry) ![]u8 {
         .budget = entry.budget,
         .codex = entry.codex,
         .grok = entry.grok,
+        .openrouter = entry.openrouter,
     }, .{}, &out.writer);
     return out.toOwnedSlice();
 }
@@ -202,12 +218,12 @@ pub fn decode(gpa: Allocator, identity: Identity, bytes: []const u8) ?Owned {
     };
     if (wire.schema_version != schema_version or
         !std.mem.eql(u8, wire.identity, &identity) or
-        !validEntry(.{ .today = wire.today, .finished = wire.finished, .budget = wire.budget, .codex = wire.codex, .grok = wire.grok }))
+        !validEntry(.{ .today = wire.today, .finished = wire.finished, .budget = wire.budget, .codex = wire.codex, .grok = wire.grok, .openrouter = wire.openrouter }))
     {
         arena.deinit();
         return null;
     }
-    return .{ .arena = arena, .entry = .{ .today = wire.today, .finished = wire.finished, .budget = wire.budget, .codex = wire.codex, .grok = wire.grok } };
+    return .{ .arena = arena, .entry = .{ .today = wire.today, .finished = wire.finished, .budget = wire.budget, .codex = wire.codex, .grok = wire.grok, .openrouter = wire.openrouter } };
 }
 
 fn validRows(rows: []const report.ModelRow) bool {
@@ -229,6 +245,7 @@ fn validEntry(entry: Entry) bool {
     if (entry.budget) |b| if (!validMoney(b.value.limit) or !validMoney(b.value.spent)) return false;
     if (entry.codex) |c| if (!c.value.valid()) return false;
     if (entry.grok) |g| if (!g.value.valid()) return false;
+    if (entry.openrouter) |o| if (!o.value.valid()) return false;
     return true;
 }
 

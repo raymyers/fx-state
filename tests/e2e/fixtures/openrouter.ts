@@ -47,6 +47,8 @@ export function createOpenRouterFixture(respond?: (body: any) => Response | Prom
   // Keys this fake has issued, plus the environment key the fixture sets.
   const validKeys = new Set<string>(["sk-or-test-key"]);
   let issued = 0;
+  // What GET /key reports; tests may change it.
+  const keyInfo: Record<string, unknown> = { label: "fx", limit: null, limit_reset: null, limit_remaining: null, usage: 0, usage_daily: 0, usage_weekly: 0, usage_monthly: 0, is_free_tier: false };
   const server = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     async fetch(request) {
@@ -81,7 +83,7 @@ export function createOpenRouterFixture(respond?: (body: any) => Response | Prom
       if (path === "/api/v1/key") {
         const key = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
         if (!validKeys.has(key)) return Response.json({ error: { code: 401, message: "No auth credentials found" } }, { status: 401 });
-        return Response.json({ data: { label: "fx", usage: 0, limit: null } });
+        return Response.json({ data: keyInfo });
       }
       if (path !== "/api/v1/chat/completions") return new Response("unexpected endpoint", { status: 404 });
       return respond ? respond(body) : openRouterCompletion(body.model, "openrouter reply");
@@ -102,5 +104,5 @@ export function createOpenRouterFixture(respond?: (body: any) => Response | Prom
     OPENROUTER_API_KEY: "sk-or-test-key",
     FX_DISABLE_KEYCHAIN: "1", FX_AUTO_UPGRADE: "0", FX_SOUND: "0", NO_COLOR: "1",
   };
-  return { home, workspace, requests, authorizations, validKeys, env, settings, settingsPath, save, close() { server.stop(true); cleanupIsolatedTestHome(home); } };
+  return { home, workspace, requests, authorizations, validKeys, keyInfo, env, settings, settingsPath, save, close() { server.stop(true); cleanupIsolatedTestHome(home); } };
 }

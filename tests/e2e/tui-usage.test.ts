@@ -1,5 +1,5 @@
 // /usage in the TUI against loopback fakes for AI Gateway, ChatGPT (Codex),
-// and the Grok CLI proxy. The clock is pinned so day ranges are exact.
+// the Grok CLI proxy, and OpenRouter. The clock is pinned so day ranges are exact.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -22,6 +22,7 @@ import {
   writeGrokLogin,
   writeUsageClock,
 } from "./usage-fakes";
+import { createOpenRouterFixture } from "./fixtures/openrouter";
 
 const TIMEOUT = 30_000;
 const TODAY = utcDate(USAGE_NOW_MS);
@@ -143,6 +144,27 @@ describe.skipIf(!tmuxAvailable())("tui: /usage", () => {
         expect(request.chatgptAccount).toBe("acct_e2e");
       }
       expect(fake.reportRanges()).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "OpenRouter /usage shows the key's spend by period and its limit",
+    async () => {
+      const f = createOpenRouterFixture();
+      Object.assign(f.keyInfo, { label: "fx laptop", usage: 42.25, usage_daily: 0.5, usage_weekly: 3.75, usage_monthly: 12, limit: 25, limit_remaining: 13, limit_reset: "monthly" });
+      stop = () => f.close();
+      session = await TmuxSession.create({ env: { ...f.env, FX_PROVIDER: "openrouter", FX_MODEL: undefined }, cwd: f.workspace });
+      await session.waitForComposer(TIMEOUT);
+      await session.sendText("/usage");
+      const pane = await session.waitForText("$42.2500", TIMEOUT);
+      expect(pane).toContain("usage: OpenRouter key (OPENROUTER_API_KEY)");
+      expect(pane).toMatch(/today\s+\$0\.5000/);
+      expect(pane).toMatch(/this week\s+\$3\.7500/);
+      expect(pane).toMatch(/this month\s+\$12\.0000/);
+      expect(pane).toMatch(/\$25\.00\s+\$13\.00\s+monthly/);
+      expect(pane).not.toContain("tab period");
+      expect(f.requests.filter((request) => request.path === "/api/v1/key").every((request) => request.authorization === "Bearer sk-or-test-key")).toBe(true);
     },
     TIMEOUT,
   );
