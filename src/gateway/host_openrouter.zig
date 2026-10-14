@@ -29,6 +29,7 @@ pub fn bundle(context: *Context) provider_set.Bundle {
         .presentation = provider_catalog.find(.openrouter),
         .auth_strategy = .openrouter,
         .capabilities = .{ .gateway_prompt_caching = true },
+        .title_model = openrouter.side_model,
         .fallback_model_capabilities_fn = openrouter_models.capabilitiesFor,
         .agent_stream = .{
             .context = context,

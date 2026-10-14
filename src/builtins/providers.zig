@@ -45,6 +45,7 @@ fn openrouterBundle() provider_set.Bundle {
     bundle.presentation = provider_catalog.find(.openrouter);
     bundle.auth_strategy = .openrouter;
     bundle.capabilities.gateway_prompt_caching = true;
+    bundle.title_model = openrouter.side_model;
     bundle.model_catalog = openrouter_models.model_catalog_provider;
     bundle.cli_model_catalog = openrouter_models.cli_model_catalog_provider;
     bundle.fallback_model_capabilities_fn = openrouter_models.capabilitiesFor;

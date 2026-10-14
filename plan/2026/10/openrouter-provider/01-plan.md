@@ -118,8 +118,9 @@ Tasks:
   - Done: attribution headers, `tool_choice`, and `max_tokens` from catalog capabilities. Open: the pooled HTTP client; each request still opens its own connection.
 - [x] When a model is missing from the catalog, warn once and fall back to unknown limits.
   - The interactive session warns once per model after the catalog loads. `fx ask` falls back silently, because it resolves capabilities inside the turn loop.
-- [ ] `src/gateway/openrouter_permission_reviewer.zig`: use a fixed reviewer model (spec open question 1) with a forced tool call.
-- [ ] Set `title_model` on the bundle.
+- [x] `src/gateway/openrouter_permission_reviewer.zig`: use a fixed reviewer model (spec open question 1) with a forced tool call.
+  - The maintainers chose `openai/gpt-5-nano`. The shared chat completions reviewer already forces the tool call, so OpenRouter sets it as the fixed `reviewer_model` instead of adding a separate file.
+- [x] Set `title_model` on the bundle. (`openai/gpt-5-nano`, for both the CLI and libfx.)
 - [x] `src/builtins/providers.zig`: wire the native bundle.
 - [x] Fill the compactor's window from catalog capabilities, so automatic compaction runs.
 

@@ -330,4 +330,29 @@ describe("openrouter provider", () => {
       expect(JSON.parse(result.stdout).usage).toEqual({ input_tokens: 12, output_tokens: 3, cost: 0.000042 });
     } finally { paid.close(); }
   }, 45000);
+
+  test("permission reviews and session titles run on the fixed side model", async () => {
+    const f = fixture((body) => {
+      if (JSON.stringify(body.messages).includes("Generate a short title")) return openRouterCompletion(body.model, "Fixture Session Title");
+      if (body.tools?.some((tool: any) => tool.function?.name === "permission_decision")) return toolCompletion(body.model, "permission_decision", { decision: "clear", rationale: "fixture review" });
+      if (body.messages.some((message: any) => message.role === "tool")) return openRouterCompletion(body.model, "edit finished");
+      return toolCompletion(body.model, "shell", { request: { action: "run", command: "echo 42" } });
+    });
+    try {
+      f.settings.permission_mode = "auto";
+      f.save();
+      const result = await runFx(["ask", "--json", "Run the snippet"], { cwd: f.workspace, env: { ...f.env, FX_PROVIDER: "openrouter" }, timeoutMs: 30000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      const chats = f.requests.filter((request) => request.path === "/api/v1/chat/completions");
+      const review = chats.find((request) => request.body.tools?.some((tool: any) => tool.function?.name === "permission_decision"))!;
+      expect(review.body.model).toBe("openai/gpt-5-nano");
+      expect(review.body.tool_choice).toBe("required");
+      const title = chats.find((request) => JSON.stringify(request.body.messages).includes("Generate a short title"))!;
+      expect(title.body.model).toBe("openai/gpt-5-nano");
+      expect(title.body.tools).toBeUndefined();
+      expect(chats.filter((request) => request !== review && request !== title).every((request) => request.body.model === "anthropic/claude-sonnet-5.5")).toBe(true);
+      const sessions = await runFx(["sessions", "--json"], { cwd: f.workspace, env: f.env });
+      expect(sessions.stdout).toContain("Fixture Session Title");
+    } finally { f.close(); }
+  }, 45000);
 });

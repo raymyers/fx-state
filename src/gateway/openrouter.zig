@@ -6,6 +6,10 @@ const endpoints = @import("../core/config/openrouter_endpoints.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// A cheap, tool-capable model for session titles and permission reviews, so
+/// those side calls never bill the user's chosen model. Revisit each release.
+pub const side_model = "openai/gpt-5-nano";
+
 /// The fixed connection the chat completions bundle borrows for the process lifetime.
 pub const definition = definitions.Definition{
     .id = "openrouter",
@@ -14,6 +18,7 @@ pub const definition = definitions.Definition{
     .auth = .{ .bearer = "OPENROUTER_API_KEY" },
     // Some upstream providers ignore tools unless tool_choice is explicit.
     .tool_choice_mode = .send,
+    .reviewer_model = side_model,
     .builtin = .openrouter,
 };
 
