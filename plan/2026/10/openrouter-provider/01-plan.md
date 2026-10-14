@@ -2,6 +2,31 @@
 
 Spec: [spec.md](spec.md)
 
+## Prior art: zaycruz/fx
+
+The fork `zaycruz/fx` added an OpenRouter provider in commit `723dbaa0`, adapted from upstream PR vercel-labs/fx#487. Use it as a reference only. Do not cherry-pick it.
+
+- The fork branched from upstream on 2026-08-29, more than 2,000 commits behind current `main` and before the Zig 0.17 upgrade, so its code does not apply cleanly.
+- The next commit, `56ce3e84`, renamed `openrouter.zig` to `local.zig` and deleted the OpenRouter catalog and e2e test. The fork's `main` no longer has OpenRouter support.
+- To read it: `git fetch https://github.com/zaycruz/fx.git main:refs/remotes/zaycruz/main`, then `git show 723dbaa0:<path>`.
+
+What it does that this plan should compare against:
+
+| Fork file at `723dbaa0` | Compare in | What to take from it |
+|---|---|---|
+| `src/gateway/openrouter_models.zig` | Milestone 3 catalog | Mapping of `context_length`, `top_provider`, `supported_parameters`, and `architecture` to capabilities. |
+| `src/gateway/openrouter.zig` | Milestones 3 and 4 dialect | Attribution headers, `reasoning.effort` serialization, and `usage: {include: true}` so cost arrives on the final chunk. |
+| `tests/e2e/openrouter-stream.test.ts` | Milestones 0 and 1 e2e | Fake-server cases: keep-alive SSE comments, a streamed tool call, 402 without retry, free-tier 429, and a `--free` model listing. |
+| Diff of `723dbaa0` across `src/core/` | Milestone 1 touch points | Every file a new `ProviderId` arm touched, as a cross-check for the grok touch-point list. |
+
+Where this plan deliberately differs:
+
+- Stream, usage, and HTTP error fixes go into the shared `chat_completions_protocol.zig` and `chat_completions.zig` (Milestone 0), so custom connections benefit. The fork kept its own SSE reader and error mapping inside `openrouter.zig`.
+- 402 is a typed insufficient-credits failure that is not retried, and 408 is retried. The fork reported 402 only as guidance text, because `FailureKind` had no variant for it, and did not handle 408.
+- Credentials include browser sign-in and a stored key (Milestone 2). The fork read only `OPENROUTER_API_KEY`.
+- Anthropic, Gemini, and Qwen models get `cache_control` breakpoints (Milestone 4). The fork sent none.
+- `provider_order` and `provider_strict` may map to OpenRouter routing (Milestone 5). The fork did not map them.
+
 Each milestone is one draft PR, merged in order. Each PR must pass every CI check in AGENTS.md on its exact commit, and must be exercised with `./zig-out/bin/fx` before it is called ready. Milestone 0 has no visible OpenRouter feature on its own, but it fixes custom connections that point at OpenRouter today.
 
 ## Milestone 0: Shared chat-completions protocol fixes
@@ -16,7 +41,7 @@ Tasks:
 - [x] After a finish, accept trailing chunks with empty or null-only deltas and a repeated identical `finish_reason`. Any other content after the finish is still rejected.
 - [x] Parse `usage.cost`, `prompt_tokens_details.cached_tokens`, `cache_write_tokens`, and `completion_tokens_details.reasoning_tokens` into `types.Usage`.
 - [x] `chat_completions.zig` `failure_kind`: classify 402 as insufficient credits (not retried) and 408 as timeout (retried).
-- [ ] `model_response_recovery.zig`: parse Retry-After as either seconds or an HTTP date. Keep the 30-second cap.
+- [x] `model_response_recovery.zig`: parse Retry-After as either seconds or an HTTP date. Keep the 30-second cap.
 
 Deliverables and tests:
 

@@ -175,6 +175,22 @@ describe("configured providers", () => {
     } finally { f.close(); }
   }, 45000);
 
+  test("Retry-After given as an HTTP date paces the retry", async () => {
+    const times: number[] = [];
+    const f = fixture(body => {
+      times.push(Date.now());
+      if (times.length > 1) return completion(body.model);
+      return new Response("{}", { status: 429, headers: { "retry-after": new Date(Date.now() + 4500).toUTCString() } });
+    });
+    try {
+      const result = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env: f.env, timeoutMs: 30000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      expect(JSON.parse(result.stdout).output).toBe("local reply");
+      expect(result.stderr).toMatch(/retrying request in [345]s/);
+      expect(times[1] - times[0]).toBeGreaterThanOrEqual(2500);
+    } finally { f.close(); }
+  }, 40000);
+
   test("a mid-stream provider error stops without retry and reports its code and message", async () => {
     const f = fixture(body => streamError(body.model, 402, "Insufficient credits", "partial "));
     try {

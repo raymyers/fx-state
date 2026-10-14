@@ -8,6 +8,71 @@ pub const max_retry_after_seconds: u64 = 30;
 const billable_retry_window_ns: u64 = 15 * 60 * std.time.ns_per_s;
 const throttled_retry_delay_ns: u64 = 60 * std.time.ns_per_s;
 
+/// Seconds to wait from a Retry-After value: delay seconds, or an HTTP date
+/// (IMF-fixdate, such as "Wed, 21 Oct 2015 07:28:00 GMT") measured from
+/// `now_unix_seconds`. A date in the past waits zero seconds. Callers still
+/// cap the wait at max_retry_after_seconds. Null when the value is neither.
+pub fn parseRetryAfter(raw: []const u8, now_unix_seconds: i64) ?u64 {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len == 0) return null;
+    if (std.ascii.isDigit(value[0])) {
+        for (value) |char| if (!std.ascii.isDigit(char)) return null;
+        return std.fmt.parseInt(u64, value, 10) catch std.math.maxInt(u64);
+    }
+    const target = parseHttpDate(value) orelse return null;
+    return if (target > now_unix_seconds) @intCast(target - now_unix_seconds) else 0;
+}
+
+fn parseHttpDate(value: []const u8) ?i64 {
+    // "Sun, 06 Nov 1994 08:49:37 GMT" is the only form servers may send.
+    if (value.len != 29) return null;
+    const weekdays = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    var weekday_known = false;
+    for (weekdays) |name| weekday_known = weekday_known or std.mem.eql(u8, value[0..3], name);
+    if (!weekday_known or !std.mem.eql(u8, value[3..5], ", ") or value[7] != ' ' or value[11] != ' ' or
+        value[16] != ' ' or value[19] != ':' or value[22] != ':' or !std.mem.eql(u8, value[25..], " GMT")) return null;
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const month: u8 = for (months, 1..) |name, number| {
+        if (std.mem.eql(u8, value[8..11], name)) break @intCast(number);
+    } else return null;
+    const day = digits(value[5..7]) orelse return null;
+    const year = digits(value[12..16]) orelse return null;
+    const hour = digits(value[17..19]) orelse return null;
+    const minute = digits(value[20..22]) orelse return null;
+    const second = digits(value[23..25]) orelse return null;
+    if (day == 0 or day > daysInMonth(year, month) or hour > 23 or minute > 59 or second > 60) return null;
+    const days = daysFromCivil(year, month, day);
+    return days * std.time.s_per_day + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
+}
+
+fn digits(text: []const u8) ?u32 {
+    var total: u32 = 0;
+    for (text) |char| {
+        if (!std.ascii.isDigit(char)) return null;
+        total = total * 10 + (char - '0');
+    }
+    return total;
+}
+
+fn daysInMonth(year: u32, month: u8) u32 {
+    return switch (month) {
+        2 => if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) 29 else 28,
+        4, 6, 9, 11 => 30,
+        else => 31,
+    };
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date.
+fn daysFromCivil(year: u32, month: u8, day: u32) i64 {
+    const y: i64 = @as(i64, year) - @intFromBool(month <= 2);
+    const era = @divFloor(y, 400);
+    const year_of_era = y - era * 400;
+    const shifted_month: i64 = if (month > 2) month - 3 else month + 9;
+    const day_of_year = @divFloor(153 * shifted_month + 2, 5) + day - 1;
+    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
+    return era * 146097 + day_of_era - 719468;
+}
+
 pub const FailureCause = enum {
     /// The network path is provably down (connection refused, unreachable,
     /// DNS failure, dead socket after wake). Nothing was or can be sent.
@@ -631,4 +696,29 @@ test "system resume strategy uses independent retry pacing" {
     });
     try std.testing.expectEqual(Strategy.continue_response, past_budget.strategy);
     try std.testing.expect(past_budget.reserve_provider_attempt);
+}
+
+test "retry after accepts delay seconds and HTTP dates" {
+    const now: i64 = 1445412480; // Wed, 21 Oct 2015 07:28:00 GMT
+    try std.testing.expectEqual(@as(?u64, 120), parseRetryAfter("120", now));
+    try std.testing.expectEqual(@as(?u64, 0), parseRetryAfter(" 0 ", now));
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), parseRetryAfter("99999999999999999999999", now));
+    try std.testing.expectEqual(@as(?u64, 0), parseRetryAfter("Wed, 21 Oct 2015 07:28:00 GMT", now));
+    try std.testing.expectEqual(@as(?u64, 45), parseRetryAfter("Wed, 21 Oct 2015 07:28:45 GMT", now));
+    try std.testing.expectEqual(@as(?u64, 86400), parseRetryAfter("Thu, 22 Oct 2015 07:28:00 GMT", now));
+    try std.testing.expectEqual(@as(?u64, 0), parseRetryAfter("Sun, 06 Nov 1994 08:49:37 GMT", now));
+    try std.testing.expectEqual(@as(?u64, 86400 + 3600), parseRetryAfter("Thu, 01 Jan 1970 01:00:00 GMT", -86400));
+    try std.testing.expectEqual(@as(?u64, 0), parseRetryAfter("Thu, 29 Feb 2024 00:00:00 GMT", 1709164800));
+    for ([_][]const u8{
+        "",
+        "-1",
+        "1.5",
+        "soon",
+        "Wed, 21 Oct 2015 07:28:00 UTC",
+        "Wed, 32 Oct 2015 07:28:00 GMT",
+        "Wed, 29 Feb 2023 07:28:00 GMT",
+        "Wed, 21 Foo 2015 07:28:00 GMT",
+        "Wed, 21 Oct 2015 24:00:00 GMT",
+        "Wednesday, 21-Oct-15 07:28:00 GMT",
+    }) |invalid| try std.testing.expectEqual(@as(?u64, null), parseRetryAfter(invalid, now));
 }

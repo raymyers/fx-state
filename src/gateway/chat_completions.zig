@@ -10,6 +10,7 @@ const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_catalog_metadata = @import("../core/gateway/model_catalog_metadata.zig");
 const classifier = @import("../core/permissions/auto_classifier.zig");
 const gateway_step = @import("../core/agent/runtime/gateway_step.zig");
+const model_response_recovery = @import("../core/agent/runtime/model_response_recovery.zig");
 const review_messages = @import("vercel_protocol.zig");
 const io = @import("../core/shared/io.zig");
 const secret = @import("../core/auth/secret.zig");
@@ -178,7 +179,7 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     var retry_after: ?u64 = null;
     var headers = response.head.iterateHeaders();
     while (headers.next()) |header| if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
-        retry_after = std.fmt.parseUnsigned(u64, std.mem.trim(u8, header.value, " \t"), 10) catch null;
+        retry_after = model_response_recovery.parseRetryAfter(header.value, @divFloor(io.milliTimestamp(), std.time.ms_per_s));
         break;
     };
     var transfer: [64 * 1024]u8 = undefined;
