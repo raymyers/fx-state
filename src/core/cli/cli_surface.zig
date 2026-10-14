@@ -837,6 +837,7 @@ fn runProviderLogin(alloc: Allocator, cfg: Config, provider: model_provider.Prov
         .gateway => try login_flow.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
         .codex => try chatgpt_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
         .grok => try grok_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
+        .openrouter => return error.OpenRouterUsesEnvironmentKey,
         .configured => return error.ConfiguredProviderUsesEnvironmentAuth,
     }
 }
@@ -854,6 +855,7 @@ fn writeProviderLoginFailure(alloc: Allocator, deps: RunDeps, provider: model_pr
         error.ClientIdMissing => "missing FX_OAUTH_CLIENT_ID; configure the fx Vercel App client id first",
         error.AccessDenied, error.ChatGptAuthorizationFailed, error.GrokAuthorizationFailed => "authorization denied",
         error.ExpiredToken, error.LoginTimedOut, error.ChatGptLoginTimedOut, error.GrokLoginTimedOut => "authorization expired; run fx login again",
+        error.OpenRouterUsesEnvironmentKey => "OpenRouter uses an API key; set OPENROUTER_API_KEY",
         else => "failed to sign in",
     });
 }
@@ -895,6 +897,31 @@ fn activateProviderSelectionFallible(
         if (caller == .provider_command) try writeStdout(deps, message);
         return true;
     }
+    // OpenRouter has no catalog yet, so the saved or default model is selected as-is.
+    if (target == .openrouter) {
+        if (cfg.auth_mode == .local) {
+            var credential = try auth_runtime.prepareCredential(alloc, cfg.gateway_provider.oauth_transport, cfg.secret_store, target, null) orelse {
+                try writeProviderActivationError(alloc, deps, caller, "set OPENROUTER_API_KEY first");
+                return false;
+            };
+            credential.deinit(alloc);
+        }
+        const selected_model = settings.models.get(target) orelse model_provider.openrouter_default_model;
+        var attempt = config_runtime.attemptUserPreferences(alloc, .{
+            .provider = target,
+            .model_preference = .{ .provider = target, .model = selected_model },
+        });
+        defer attempt.deinit(alloc);
+        switch (attempt) {
+            .failure => {
+                try writeProviderActivationError(alloc, deps, caller, "failed to save provider selection");
+                return false;
+            },
+            .outcome => {},
+        }
+        if (caller == .provider_command) try writeStdout(deps, "Provider set to OpenRouter.\n");
+        return true;
+    }
     const preferred_source = exact_source orelse settings.credential_source;
     var prepared_credential = if (cfg.auth_mode == .host_managed)
         null
@@ -919,6 +946,7 @@ fn activateProviderSelectionFallible(
             .gateway => "Gateway is already selected.\n",
             .codex => "Codex is already selected.\n",
             .grok => "Grok is already selected.\n",
+            .openrouter => "OpenRouter is already selected.\n",
             .configured => "Configured provider is already selected.\n",
         });
         return true;
@@ -952,6 +980,7 @@ fn activateProviderSelectionFallible(
             switch (target) {
                 .codex => "Codex credential is unavailable",
                 .grok => "Grok credential is unavailable",
+                .openrouter => "set OPENROUTER_API_KEY first",
                 .gateway => "configure a Gateway credential first",
                 .configured => "configure the provider auth environment variable first",
             },
@@ -962,6 +991,7 @@ fn activateProviderSelectionFallible(
         try writeProviderActivationError(alloc, deps, caller, switch (target) {
             .codex => "Codex model catalog is unavailable",
             .grok => "Grok model catalog is unavailable",
+            .openrouter => "OpenRouter model catalog is unavailable",
             .gateway => "Gateway model catalog is unavailable",
             .configured => "Configured model catalog is unavailable",
         });
@@ -1029,13 +1059,14 @@ fn activateProviderSelectionFallible(
     if (performed_login) |provider| switch (provider) {
         .codex => try writeStdout(deps, "Signed in with Codex.\n"),
         .grok => try writeStdout(deps, "Signed in with Grok.\n"),
-        .gateway, .configured => unreachable,
+        .gateway, .openrouter, .configured => unreachable,
     };
     if (caller == .provider_command) {
         try writeStdout(deps, switch (target) {
             .gateway => "Provider set to Gateway.\n",
             .codex => "Provider set to Codex.\n",
             .grok => "Provider set to Grok.\n",
+            .openrouter => "Provider set to OpenRouter.\n",
             .configured => "Provider set to configured connection.\n",
         });
     }
@@ -1193,6 +1224,7 @@ fn runNonInteractiveWithDeps(
                 .gateway => "Signed in to Vercel.\nAI Gateway access may still require billing or API setup for the selected account.\n",
                 .codex => "Signed in with Codex.\n",
                 .grok => "Signed in with Grok.\n",
+                .openrouter => unreachable,
                 .configured => "Configured providers use settings.json authentication.\n",
             });
             return .handled_success;
@@ -1336,7 +1368,7 @@ fn runNonInteractiveWithDeps(
                 return .handled_failure;
             }
             const target = model_provider.parse(rest[0]) orelse {
-                try writeStderr(deps, "fx provider: expected gateway, codex, grok, or a configured name\n");
+                try writeStderr(deps, "fx provider: expected gateway, codex, grok, openrouter, or a configured name\n");
                 return .handled_failure;
             };
             return if (try activateProviderSelection(alloc, cfg, deps, target, .provider_command, null))
@@ -1483,6 +1515,7 @@ fn runNonInteractiveWithDeps(
                     .gateway => "fx models: Gateway model catalog is unavailable\n",
                     .codex => "fx models: Codex model catalog is unavailable\n",
                     .grok => "fx models: Grok model catalog is unavailable\n",
+                    .openrouter => "fx models: OpenRouter model catalog is unavailable\n",
                     .configured => "fx models: Configured model catalog is unavailable\n",
                 });
                 return .handled_failure;

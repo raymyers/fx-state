@@ -36,7 +36,14 @@ const credential_source_order = [_]credentials.Source{
     .stored_key,
     .chatgpt_subscription,
     .grok_subscription,
+    .openrouter_api_key,
+    .openrouter_login,
 };
+
+/// Sources that can authorize Gateway, as opposed to another provider's login or key.
+fn gatewaySource(source: credentials.Source) bool {
+    return model_provider.authorizesCredential(.gateway, source);
+}
 
 const SourceProbeFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!bool;
 const CredentialLoaderFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!?credentials.Credential;
@@ -1503,6 +1510,7 @@ pub const StatusSnapshot = struct {
     gateway_connected: bool = false,
     chatgpt_connected: bool = false,
     grok_connected: bool = false,
+    openrouter_connected: bool = false,
     /// The active credential is past its refresh deadline. Distinct from `refreshable`,
     /// which answers whether this source type can refresh at all.
     expired: bool = false,
@@ -1563,6 +1571,10 @@ pub const StatusSnapshot = struct {
                 .cli => credentials.missing_grok_credential_message,
                 .interactive => credentials.missing_grok_interactive_credential_message,
             },
+            .openrouter_api_key, .openrouter_login => switch (surface) {
+                .cli => credentials.missing_openrouter_credential_message,
+                .interactive => credentials.missing_openrouter_interactive_credential_message,
+            },
             .host_managed => automatic_help,
             .configured => "The configured provider credential is unavailable. Check its auth environment variable in settings.json; no other provider was selected.",
         };
@@ -1613,6 +1625,13 @@ pub fn loadStatusSnapshotForProvider(
         error.OutOfMemory => return err,
         else => false,
     };
+    var openrouter_connected = false;
+    for ([_]credentials.Source{ .openrouter_api_key, .openrouter_login }) |source| {
+        openrouter_connected = openrouter_connected or credentials.sourceExists(alloc, secret_store, source) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => false,
+        };
+    }
     // Resolves in `.stored` mode: a diagnostic must not refresh, because refreshing
     // rewrites the session file and performs network I/O. It reports the expired state
     // instead of repairing it.
@@ -1641,9 +1660,9 @@ pub fn loadStatusSnapshotForProvider(
         },
     };
     const resolved_source = if (resolution.credential) |credential| credential.source else null;
-    var gateway_connected = resolved_source != null and resolved_source != .chatgpt_subscription and resolved_source != .grok_subscription and resolved_source != .configured;
-    const gateway_probe_required = (provider != null and (provider.? == .codex or provider.? == .grok)) or
-        resolved_source == .chatgpt_subscription or resolved_source == .grok_subscription;
+    var gateway_connected = resolved_source != null and gatewaySource(resolved_source.?);
+    const gateway_probe_required = (provider != null and (provider.? == .codex or provider.? == .grok or provider.? == .openrouter)) or
+        resolved_source == .chatgpt_subscription or resolved_source == .grok_subscription or (resolved_source != null and resolved_source.?.isOpenRouter());
     if (gateway_probe_required) {
         for ([_]credentials.Source{ .vercel_oidc_token, .ai_gateway_api_key, .fx_login, .stored_key }) |source| {
             if (credentials.sourceExists(alloc, secret_store, source) catch |err| switch (err) {
@@ -1669,6 +1688,7 @@ pub fn loadStatusSnapshotForProvider(
             .gateway_connected = gateway_connected,
             .chatgpt_connected = chatgpt_connected,
             .grok_connected = grok_connected,
+            .openrouter_connected = openrouter_connected,
             .expired = expired,
         };
     }
@@ -1680,6 +1700,7 @@ pub fn loadStatusSnapshotForProvider(
         .gateway_connected = gateway_connected,
         .chatgpt_connected = chatgpt_connected,
         .grok_connected = grok_connected,
+        .openrouter_connected = openrouter_connected,
     };
 }
 
@@ -1976,6 +1997,7 @@ pub const Runtime = struct {
             .gateway_connected = true,
             .chatgpt_connected = true,
             .grok_connected = true,
+            .openrouter_connected = true,
         };
         const gateway_connected = self.source_inventory.contains(.vercel_oidc_token) or
             self.source_inventory.contains(.ai_gateway_api_key) or
@@ -1983,6 +2005,7 @@ pub const Runtime = struct {
             self.source_inventory.contains(.stored_key);
         const chatgpt_connected = self.source_inventory.contains(.chatgpt_subscription);
         const grok_connected = self.source_inventory.contains(.grok_subscription);
+        const openrouter_connected = self.source_inventory.contains(.openrouter_api_key) or self.source_inventory.contains(.openrouter_login);
         const credential = self.selected_credential orelse return .{
             .required_source = requestedSource(provider, preferred),
             .failure = if (self.credential_failure) |episode|
@@ -1994,6 +2017,7 @@ pub const Runtime = struct {
             .gateway_connected = gateway_connected,
             .chatgpt_connected = chatgpt_connected,
             .grok_connected = grok_connected,
+            .openrouter_connected = openrouter_connected,
         };
         return .{
             .active_source = credential.source,
@@ -2001,6 +2025,7 @@ pub const Runtime = struct {
             .gateway_connected = gateway_connected,
             .chatgpt_connected = chatgpt_connected,
             .grok_connected = grok_connected,
+            .openrouter_connected = openrouter_connected,
             .expired = credential.needsRefreshAt(now_ms),
         };
     }
@@ -2337,7 +2362,7 @@ pub const Runtime = struct {
         self.picker_stage = .switch_credential;
         const active_source = self.credentialSource();
         self.picker_selection = if (active_source) |source|
-            if (source != .chatgpt_subscription and source != .grok_subscription and self.source_inventory.contains(source))
+            if (gatewaySource(source) and self.source_inventory.contains(source))
                 .{ .source = source }
             else
                 self.pickerView().choiceAt(0)
@@ -2968,7 +2993,7 @@ pub const Runtime = struct {
 
         try self.refreshSourceInventoryWithProbe(alloc, ctx, probe);
         for (credential_source_order) |source| {
-            if (source == .chatgpt_subscription or source == .grok_subscription) continue;
+            if (!gatewaySource(source)) continue;
             if (!self.source_inventory.contains(source)) continue;
             if (try self.selectSourceWithLoader(alloc, source, ctx, loader) != null) {
                 return self.credentialSource() != previous;
@@ -3030,7 +3055,7 @@ pub const Runtime = struct {
         if (!login_was_active) return false;
 
         for (credential_source_order) |source| {
-            if (source == .chatgpt_subscription or source == .grok_subscription) continue;
+            if (!gatewaySource(source)) continue;
             if (!self.source_inventory.contains(source)) continue;
             if (try self.selectSourceWithLoader(alloc, source, ctx, loader) != null) return true;
             self.source_inventory.remove(source);
@@ -3196,7 +3221,7 @@ fn takeDisplayTeam(alloc: Allocator, credential: *credentials.Credential) ?[]u8 
 fn gatewaySourceCount(sources: SourceSet) usize {
     var count: usize = 0;
     for (credential_source_order) |source| {
-        if (source == .chatgpt_subscription or source == .grok_subscription or !sources.contains(source)) continue;
+        if (!gatewaySource(source) or !sources.contains(source)) continue;
         count += 1;
     }
     return count;
@@ -3205,7 +3230,7 @@ fn gatewaySourceCount(sources: SourceSet) usize {
 fn gatewaySourceAtIndex(sources: SourceSet, wanted_index: usize) ?credentials.Source {
     var index: usize = 0;
     for (credential_source_order) |source| {
-        if (source == .chatgpt_subscription or source == .grok_subscription or !sources.contains(source)) continue;
+        if (!gatewaySource(source) or !sources.contains(source)) continue;
         if (index == wanted_index) return source;
         index += 1;
     }

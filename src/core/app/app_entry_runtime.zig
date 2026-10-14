@@ -542,7 +542,7 @@ fn formatResumeHandoff(buffer: []u8, session_id: []const u8, sessions_v2: bool) 
 }
 
 fn formatUnexpectedError(buffer: []u8, err: anyerror) ![]const u8 {
-    return std.mem.print(buffer, "fx: {s}\n", .{config_runtime.modelNotSelectedMessage(err) orelse @errorName(err)});
+    return std.mem.print(buffer, "fx: {s}\n", .{config_runtime.startupErrorMessage(err) orelse @errorName(err)});
 }
 
 /// A v2 session that cannot be written at startup, in one sentence; null
@@ -569,7 +569,7 @@ fn writeStderr(deps: RunDeps, text: []const u8) void {
 
 fn tryWriteErrorMessage(deps: RunDeps, err: anyerror) void {
     writeStderr(deps, "fx: ");
-    writeStderr(deps, config_runtime.modelNotSelectedMessage(err) orelse @errorName(err));
+    writeStderr(deps, config_runtime.startupErrorMessage(err) orelse @errorName(err));
     writeStderr(deps, "\n");
 }
 

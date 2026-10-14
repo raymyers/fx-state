@@ -2618,7 +2618,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     defer request.deinit(alloc);
 
     var startup = loadConfiguredStartupState(state, alloc) catch |err| {
-        const model_message = config_runtime.modelNotSelectedMessage(err);
+        const model_message = config_runtime.startupErrorMessage(err);
         return state.writer.writeError(alloc, msg.id, .{
             .code = if (model_message != null) ErrorCode.invalid_request else ErrorCode.internal_error,
             .message = model_message orelse "Failed to load startup state",
@@ -2719,6 +2719,8 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
                         credentials.missing_chatgpt_credential_message
                     else if (state.provider == .grok)
                         credentials.missing_grok_credential_message
+                    else if (state.provider == .openrouter)
+                        credentials.missing_openrouter_credential_message
                     else
                         credentials.missing_credential_message,
                 });
@@ -2732,6 +2734,8 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
                     credentials.missing_chatgpt_credential_message
                 else if (state.provider == .grok)
                     credentials.missing_grok_credential_message
+                else if (state.provider == .openrouter)
+                    credentials.missing_openrouter_credential_message
                 else
                     credentials.missing_credential_message,
             });
@@ -3250,6 +3254,8 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                             credentials.missing_chatgpt_credential_message
                         else if (session.provider == .grok)
                             credentials.missing_grok_credential_message
+                        else if (session.provider == .openrouter)
+                            credentials.missing_openrouter_credential_message
                         else
                             "Configured provider authentication is unavailable",
                     });
@@ -3332,6 +3338,8 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
                             credentials.missing_chatgpt_credential_message
                         else if (target == .grok)
                             credentials.missing_grok_credential_message
+                        else if (target == .openrouter)
+                            credentials.missing_openrouter_credential_message
                         else
                             credentials.missing_credential_message,
                     });

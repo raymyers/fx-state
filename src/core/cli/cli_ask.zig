@@ -1373,7 +1373,7 @@ fn writeAskUsage(deps: RunDeps, usage: []const u8) !void {
 
 fn askErrorNotice(err: anyerror) ?[]const u8 {
     if (auth_runtime.preparationFailureNotice(err)) |notice| return notice;
-    if (config_runtime.modelNotSelectedMessage(err)) |message| return message;
+    if (config_runtime.startupErrorMessage(err)) |message| return message;
     return switch (err) {
         error.ImagePreparationFailed => image_attachments.image_preparation_failed_notice,
         error.ModelImageCapabilityUnavailable => image_attachments.model_image_capability_unavailable_notice,

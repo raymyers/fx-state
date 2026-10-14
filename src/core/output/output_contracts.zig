@@ -571,7 +571,12 @@ fn writeTerminalSafe(writer: *std.Io.Writer, alloc: Allocator, raw: []const u8) 
 
 fn gatewayProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
     const source = auth.active_source orelse return auth.gateway_connected;
-    return auth.gateway_connected or (source != .chatgpt_subscription and source != .grok_subscription and source != .configured);
+    return auth.gateway_connected or model_provider.authorizesCredential(.gateway, source);
+}
+
+fn openRouterProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
+    const source = auth.active_source orelse return auth.openrouter_connected;
+    return auth.openrouter_connected or source.isOpenRouter();
 }
 
 fn chatGptProviderConnected(auth: auth_runtime.StatusSnapshot) bool {
@@ -596,6 +601,11 @@ fn writeConnectedProvidersText(writer: *std.Io.Writer, auth: auth_runtime.Status
     if (grokProviderConnected(auth)) {
         if (wrote_provider) try writer.writeAll(", Grok");
         if (!wrote_provider) try writer.writeAll("Grok");
+        wrote_provider = true;
+    }
+    if (openRouterProviderConnected(auth)) {
+        if (wrote_provider) try writer.writeAll(", OpenRouter");
+        if (!wrote_provider) try writer.writeAll("OpenRouter");
         wrote_provider = true;
     }
     if (!wrote_provider) try writer.writeAll("none");
@@ -804,7 +814,7 @@ pub const StatusSnapshot = struct {
     fn writeConnections(self: StatusSnapshot, writer: *std.Io.Writer) !void {
         if (self.provider == .configured and self.auth.active_source == .configured) {
             try writer.writeAll(self.provider.label());
-            if (!gatewayProviderConnected(self.auth) and !chatGptProviderConnected(self.auth) and !grokProviderConnected(self.auth)) return;
+            if (!gatewayProviderConnected(self.auth) and !chatGptProviderConnected(self.auth) and !grokProviderConnected(self.auth) and !openRouterProviderConnected(self.auth)) return;
             try writer.writeAll(", ");
         }
         try writeConnectedProvidersText(writer, self.auth);
@@ -875,6 +885,11 @@ pub const StatusSnapshot = struct {
             if (grokProviderConnected(self.auth)) {
                 if (wrote_provider) try writer.writeByte(',');
                 try std.json.Stringify.value("grok", .{}, writer);
+                wrote_provider = true;
+            }
+            if (openRouterProviderConnected(self.auth)) {
+                if (wrote_provider) try writer.writeByte(',');
+                try std.json.Stringify.value("openrouter", .{}, writer);
             }
             try writer.writeByte(']');
         }
@@ -1149,6 +1164,7 @@ pub const ModelListSnapshot = struct {
             .gateway => "gateway",
             .codex => provider_catalog.label(.codex),
             .grok => provider_catalog.label(.grok),
+            .openrouter => provider_catalog.label(.openrouter),
             .configured => "configured provider",
         };
     }

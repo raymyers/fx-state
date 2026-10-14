@@ -20,6 +20,7 @@ import { FX_BIN, REPO_ROOT, runFx, providerVersionTestEnv } from "../evals/eval-
 import { fakeResponsesTitleDefault, TITLE_GENERATION_MARKER } from "./tmux-helpers";
 import { readTapeFrames } from "./render-lab/tape";
 import { equivalentPngEncodings, solidPng } from "./fixtures/image-encoding";
+import { openRouterCompletion } from "./fixtures/chat-completions";
 import {
   FAKE_GATEWAY_MODEL,
   fakeGatewayFinalText,
@@ -3070,6 +3071,45 @@ for (const provider of ["codex", "grok"] as const) {
     expect(readFileSync(stderrPath, "utf8")).toBe("");
   }, TIMEOUT);
 }
+
+tmuxTest(
+  "the provider picker switches to OpenRouter with its environment key",
+  async () => {
+    home = mkdtempSync(join(tmpdir(), "fx-openrouter-picker-"));
+    stderrPath = join(home, "stderr.log");
+    gateway = startFakeGateway();
+    const requests: Array<{ authorization: string | null; model: string }> = [];
+    const openrouter = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const body = await request.json();
+        requests.push({ authorization: request.headers.get("authorization"), model: body.model });
+        return openRouterCompletion(body.model, "OPENROUTER_PICKER_RESPONSE");
+      },
+    });
+    try {
+      session = await startFx(home, stderrPath, gateway, undefined, undefined, {
+        FX_MODEL: undefined,
+        OPENROUTER_API_KEY: "sk-or-picker",
+        FX_E2E_OPENROUTER_BASE_URL: `http://127.0.0.1:${openrouter.port}/api/v1`,
+      });
+      await session.waitForComposer(TIMEOUT);
+      await openProviderPicker(session);
+      await session.waitForPane((pane) => pane.includes("openrouter"), TIMEOUT);
+      await session.sendText("openrouter");
+      await session.waitForText("Switched to OpenRouter with anthropic/claude-sonnet-5.5.", TIMEOUT);
+      expect(JSON.parse(readFileSync(join(home, ".fx", "settings.json"), "utf8")).provider).toBe("openrouter");
+      await session.sendText("Answer from OpenRouter.");
+      await session.waitForText("OPENROUTER_PICKER_RESPONSE", TIMEOUT);
+      expect(requests).toEqual([{ authorization: "Bearer sk-or-picker", model: "anthropic/claude-sonnet-5.5" }]);
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+    } finally {
+      openrouter.stop(true);
+    }
+  },
+  60_000,
+);
 
 async function startFxWithoutAuth(
   testHome: string,

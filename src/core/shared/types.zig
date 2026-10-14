@@ -111,8 +111,16 @@ pub const CredentialSource = enum {
     stored_key,
     chatgpt_subscription,
     grok_subscription,
+    /// OPENROUTER_API_KEY.
+    openrouter_api_key,
+    /// A key saved by `fx login openrouter`.
+    openrouter_login,
     host_managed,
     configured,
+
+    pub fn isOpenRouter(self: CredentialSource) bool {
+        return self == .openrouter_api_key or self == .openrouter_login;
+    }
 };
 
 pub const DirectCredentialLease = struct {

@@ -6,6 +6,7 @@ pub const root_dir_name = ".fx";
 pub const auth_file_name = "auth.json";
 pub const chatgpt_auth_file_name = "chatgpt-auth.json";
 pub const grok_auth_file_name = "grok-auth.json";
+pub const openrouter_auth_file_name = "openrouter-auth.json";
 pub const api_key_file_name = "api-key";
 pub const sessions_dir_name = "sessions";
 /// Side folders older v2 sessions kept (D27): v1's per-session layout, one

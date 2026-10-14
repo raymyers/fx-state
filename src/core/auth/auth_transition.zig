@@ -73,7 +73,7 @@ pub fn logoutFallbackProviders(facts: LogoutFacts) [2]?model_provider.ProviderId
                 facts.available_sources.contains(.stored_key),
             .codex => facts.available_sources.contains(.chatgpt_subscription),
             .grok => facts.available_sources.contains(.grok_subscription),
-            .configured => false,
+            .openrouter, .configured => false,
         };
         if (!available) continue;
         candidates[count] = provider;
@@ -148,7 +148,7 @@ pub fn signInCompletion(
 ) SignInCompletionAction {
     return switch (provider) {
         .gateway => .vercel,
-        .configured => .{ .switch_provider = provider },
+        .openrouter, .configured => .{ .switch_provider = provider },
         .codex => if (provider_routing_supported)
             .{ .switch_provider = .codex }
         else

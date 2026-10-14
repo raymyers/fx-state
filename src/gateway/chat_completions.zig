@@ -1,5 +1,6 @@
 const std = @import("std");
 const codec = @import("chat_completions_protocol.zig");
+const openrouter = @import("openrouter.zig");
 const client_mod = @import("client.zig");
 const definitions = @import("../core/config/configured_provider.zig");
 const streams = @import("../core/agent/stream_provider.zig");
@@ -42,6 +43,9 @@ fn definition_at(raw: ?*anyopaque) *const definitions.Definition {
 }
 
 fn bound_identity(definition: *const definitions.Definition) model_provider.ProviderId {
+    if (definition.builtin) |builtin| return switch (builtin) {
+        .openrouter => .openrouter,
+    };
     var identity = model_provider.parse(definition.id).?;
     identity.configured.binding = definition.binding_identity();
     return identity;
@@ -109,7 +113,9 @@ test "chat completions adapter binds replay to endpoint authority and wires proj
 fn stream(raw: ?*anyopaque, alloc: Allocator, request: streams.ModelRequest) !streams.Result {
     if (request.cancel_flag.load(.seq_cst)) return error.Cancelled;
     const definition = definition_at(raw);
-    if (request.credential.credentialSource() != .configured) return error.ConfiguredProviderCredentialRequired;
+    if (definition.builtin != null) {
+        if (!model_provider.authorizesCredential(bound_identity(definition), request.credential.credentialSource())) return error.ProviderCredentialRequired;
+    } else if (request.credential.credentialSource() != .configured) return error.ConfiguredProviderCredentialRequired;
     const token = request.credential.secret();
     if (token) |value| {
         if (value.len > 16 * 1024) return error.InvalidConfiguredProviderCredential;
@@ -140,7 +146,7 @@ fn phase_deadline(milliseconds: i64, caller: ?std.Io.Clock.Timestamp) std.Io.Clo
 }
 
 fn post(alloc: Allocator, definition: *const definitions.Definition, request: streams.ModelRequest, token: ?[]const u8, payload: []const u8) !streams.Result {
-    const url = try definition.chat_url(alloc);
+    const url = if (definition.builtin == .openrouter) try openrouter.chat_url(alloc) else try definition.chat_url(alloc);
     defer alloc.free(url);
     const authorization = if (token) |value| try alloc.print("Bearer {s}", .{value}) else null;
     defer if (authorization) |value| secret.zeroAndFree(alloc, value);
@@ -216,6 +222,21 @@ pub fn failure_kind(status: std.http.Status) streams.FailureKind {
         .gateway_timeout => .gateway_timeout,
         else => .provider_error,
     };
+}
+
+test "the OpenRouter definition carries its built-in identity and replay binding" {
+    try std.testing.expectEqual(model_provider.ProviderId.openrouter, bound_identity(&openrouter.definition));
+    try std.testing.expect(model_provider.authorizesCredential(bound_identity(&openrouter.definition), .openrouter_api_key));
+    try std.testing.expect(!model_provider.authorizesCredential(bound_identity(&openrouter.definition), .configured));
+    const replay = types.ProviderReplay{ .source = .{ .provider = .openrouter, .model = "anthropic/claude-sonnet-5.5" }, .parts_json = "{\"reasoning\":\"kept\",\"_tool_call_ids\":[]}" };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "hi" },
+        .{ .role = .assistant, .content = "hello", .provider_replay = replay },
+        .{ .role = .user, .content = "again" },
+    };
+    const body = try build_for(&openrouter.definition, std.testing.allocator, .{ .model = "anthropic/claude-sonnet-5.5", .messages = &messages, .tools = .{}, .tool_choice = .auto, .provider_options = .{} });
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.find(u8, body, "\"reasoning\":\"kept\"") != null);
 }
 
 test "chat completions failure kinds classify credits and timeouts" {

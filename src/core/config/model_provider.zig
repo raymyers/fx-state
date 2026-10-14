@@ -7,6 +7,7 @@ pub const ProviderId = union(enum) {
     gateway,
     codex,
     grok,
+    openrouter,
     configured: struct {
         bytes: [configured_provider.max_id_bytes]u8 = @splat(0),
         len: u8,
@@ -19,6 +20,7 @@ pub const ProviderId = union(enum) {
             .gateway => "gateway",
             .codex => "codex",
             .grok => "grok",
+            .openrouter => "openrouter",
             .configured => |*value| value.bytes[0..value.len],
         };
     }
@@ -98,6 +100,9 @@ pub const NameKey = struct {
     }
 };
 
+/// Used when `models.openrouter` is unset.
+pub const openrouter_default_model = "anthropic/claude-sonnet-5.5";
+
 pub const ProviderSelection = struct {
     provider: ProviderId,
     model: []const u8,
@@ -107,6 +112,7 @@ pub fn parse(value: []const u8) ?ProviderId {
     if (std.ascii.eqlIgnoreCase(value, "gateway")) return .gateway;
     if (std.ascii.eqlIgnoreCase(value, "codex")) return .codex;
     if (std.ascii.eqlIgnoreCase(value, "grok")) return .grok;
+    if (std.ascii.eqlIgnoreCase(value, "openrouter")) return .openrouter;
     configured_provider.validate_id(value) catch return null;
     var result: ProviderId = .{ .configured = .{ .len = @intCast(value.len) } };
     @memcpy(result.configured.bytes[0..value.len], value);
@@ -135,10 +141,11 @@ pub fn authorizesCredential(provider: ProviderId, source: ?types.CredentialSourc
     const selected = source orelse return false;
     if (selected == .host_managed) return true;
     return switch (provider) {
-        .gateway => selected != .chatgpt_subscription and selected != .grok_subscription and selected != .configured,
+        .gateway => selected != .chatgpt_subscription and selected != .grok_subscription and !selected.isOpenRouter() and selected != .configured,
         .configured => selected == .configured,
         .codex => selected == .chatgpt_subscription,
         .grok => selected == .grok_subscription,
+        .openrouter => selected.isOpenRouter(),
     };
 }
 
@@ -152,6 +159,12 @@ test "explicit providers authorize only their own credential origins" {
     try std.testing.expect(authorizesCredential(.grok, .grok_subscription));
     try std.testing.expect(!authorizesCredential(.grok, .chatgpt_subscription));
     try std.testing.expect(!authorizesCredential(.gateway, .grok_subscription));
+    try std.testing.expect(authorizesCredential(.openrouter, .openrouter_api_key));
+    try std.testing.expect(authorizesCredential(.openrouter, .openrouter_login));
+    try std.testing.expect(!authorizesCredential(.openrouter, .ai_gateway_api_key));
+    try std.testing.expect(!authorizesCredential(.openrouter, .configured));
+    try std.testing.expect(!authorizesCredential(.gateway, .openrouter_api_key));
+    try std.testing.expect(!authorizesCredential(.gateway, .openrouter_login));
 }
 
 test "configured provider identity serializes its binding and rejects rebinding" {
@@ -201,7 +214,20 @@ test "provider parsing recognizes builtins and validated configured names" {
     try std.testing.expectEqual(ProviderId.gateway, parse("gateway").?);
     try std.testing.expectEqual(ProviderId.codex, parse("CODEX").?);
     try std.testing.expectEqual(ProviderId.grok, parse("GROK").?);
+    try std.testing.expectEqual(ProviderId.openrouter, parse("OpenRouter").?);
     try std.testing.expect(parse("openai-codex").? == .configured);
     try std.testing.expect(parse("bad/name") == null);
     try std.testing.expect(parse("") == null);
+}
+
+test "openrouter round trips through a saved session as a built-in name" {
+    const alloc = std.testing.allocator;
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    try std.json.Stringify.value(ProviderId.openrouter, .{}, &output.writer);
+    try std.testing.expectEqualStrings("\"openrouter\"", output.written());
+    var decoded = try std.json.parseFromSlice(ProviderId, alloc, output.written(), .{});
+    defer decoded.deinit();
+    try std.testing.expect(decoded.value.same_authority(.openrouter));
+    try std.testing.expectEqualStrings("openrouter", NameKey.fromProvider(decoded.value).label());
 }

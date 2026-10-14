@@ -27,6 +27,8 @@ pub fn derive(
         .stored_key,
         .host_managed,
         .configured,
+        .openrouter_api_key,
+        .openrouter_login,
         => hash.update("\x00slot\x00"),
         .chatgpt_subscription,
         .grok_subscription,

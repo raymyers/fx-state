@@ -9,6 +9,7 @@ const xai_grok_permission_reviewer = @import("../gateway/xai_grok_permission_rev
 const provider_catalog = @import("../core/auth/provider_catalog.zig");
 const chat_completions = @import("../gateway/chat_completions.zig");
 const configured_provider = @import("../core/config/configured_provider.zig");
+const openrouter = @import("../gateway/openrouter.zig");
 
 fn configuredBundle(_: ?*anyopaque, definition: *const configured_provider.Definition) provider_set.Bundle {
     return chat_completions.bundle(definition);
@@ -35,4 +36,12 @@ pub const native = provider_set.Set{
         .model_catalog = xai_grok_models.model_catalog_provider,
         .permission_reviewer = xai_grok_permission_reviewer.provider,
     },
+    .openrouter = openrouterBundle(),
 };
+
+fn openrouterBundle() provider_set.Bundle {
+    var bundle = chat_completions.bundle(&openrouter.definition);
+    bundle.presentation = provider_catalog.find(.openrouter);
+    bundle.auth_strategy = .openrouter;
+    return bundle;
+}

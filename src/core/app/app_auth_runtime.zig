@@ -180,6 +180,7 @@ pub fn Runtime(comptime App: type) type {
                         .gateway => credentials.missing_interactive_credential_message,
                         .codex => credentials.missing_chatgpt_interactive_credential_message,
                         .grok => credentials.missing_grok_interactive_credential_message,
+                        .openrouter => credentials.missing_openrouter_interactive_credential_message,
                         .configured => "Configured provider authentication is unavailable. Check settings.json and its environment variable.",
                     },
                 }, true),
@@ -208,6 +209,8 @@ pub fn Runtime(comptime App: type) type {
                         "Configured provider authentication is unavailable. Check settings.json and its environment variable."
                     else if (provider == .grok)
                         credentials.missing_grok_interactive_credential_message
+                    else if (provider == .openrouter)
+                        credentials.missing_openrouter_interactive_credential_message
                     else
                         credentials.missing_chatgpt_interactive_credential_message,
                 }, true);
@@ -1004,7 +1007,7 @@ pub fn Runtime(comptime App: type) type {
         fn rememberCredentialSource(app: *App, source: credentials.Source) void {
             // ChatGPT is selected by model route, not as a global Gateway
             // credential preference. Its saved session coexists independently.
-            if (source == .chatgpt_subscription or source == .grok_subscription) return;
+            if (source == .chatgpt_subscription or source == .grok_subscription or source.isOpenRouter()) return;
             if (comptime @hasDecl(App, "persistCredentialSourcePreference")) {
                 app.persistCredentialSourcePreference(source);
                 return;
@@ -1316,14 +1319,14 @@ pub fn Runtime(comptime App: type) type {
                     switch (target) {
                         .codex => try beginCodexSignInForProviderSwitch(app),
                         .grok => try beginGrokSignInForProviderSwitch(app),
-                        .gateway, .configured => {},
+                        .gateway, .openrouter, .configured => {},
                     }
                 }
-                if (target == .gateway or !request.allow_login) {
+                if (target == .gateway or target == .openrouter or !request.allow_login) {
                     try app.writeDomainNotice(.{
                         .topic = "provider",
                         .tone = .warning,
-                        .body = if (intent == .post_oauth) "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged." else if (target == .codex) "Run fx login codex, then try switching again." else if (target == .grok) "Run fx login grok, then try switching again." else credentials.missing_interactive_credential_message,
+                        .body = if (intent == .post_oauth) "Subscription sign-in completed, but its saved credential is unavailable. The current provider is unchanged." else if (target == .codex) "Run fx login codex, then try switching again." else if (target == .grok) "Run fx login grok, then try switching again." else if (target == .openrouter) credentials.missing_openrouter_interactive_credential_message else credentials.missing_interactive_credential_message,
                     }, true);
                 }
                 return false;
@@ -1924,6 +1927,8 @@ pub fn Runtime(comptime App: type) type {
                 .vercel_oidc_token,
                 .ai_gateway_api_key,
                 .stored_key,
+                .openrouter_api_key,
+                .openrouter_login,
                 .host_managed,
                 .configured,
                 => {},
@@ -2263,7 +2268,7 @@ test "interactive subscription sign-in rejects active and queued work before OAu
             switch (provider) {
                 .codex => try Runtime(BusySignInApp).beginChatGptSignIn(&app),
                 .grok => try Runtime(BusySignInApp).beginGrokSignIn(&app),
-                .gateway, .configured => unreachable,
+                .gateway, .openrouter, .configured => unreachable,
             }
 
             try std.testing.expectEqual(@as(usize, 0), app.auth.start_count);

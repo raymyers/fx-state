@@ -56,17 +56,19 @@ Goal: `openrouter` is a selectable built-in provider that uses `OPENROUTER_API_K
 
 Tasks:
 
-- [ ] `model_provider.zig`: add `ProviderId.openrouter`, including `label`, `parse`, `parse_saved`, and `authorizesCredential`. Update every exhaustive `switch` and every ad-hoc `source != ...` check (`auth_runtime.zig`, `output_contracts.zig`).
-- [ ] `configured_provider.zig`: reserve `openrouter`. When a profile already defines it, return a dedicated error that tells the user to rename or delete the custom connection.
-- [ ] `provider_set.zig`: add the `openrouter` Bundle slot, `AuthStrategy.openrouter`, and a `select` arm.
-- [ ] `types.zig` and `credentials.zig`: add the `openrouter_api_key` (`OPENROUTER_API_KEY`) and `openrouter_login` (secret store) sources, including load, exists, missing-credential messages, and the auth-file mapping. Nothing writes `openrouter_login` until Milestone 2.
-- [ ] Default model `anthropic/claude-sonnet-5.5` when `models.openrouter` is unset.
-- [ ] `provider_catalog.zig` and `provider_picker_catalog.zig`: add the OpenRouter row, and update the picker rows that are hardcoded by index.
-- [ ] `settings_store.zig`: add `models.openrouter` persistence.
-- [ ] ACP: add the provider option in `src/acp/sessions.zig` and the missing-credential branches in `server.zig` and `prompt.zig`.
-- [ ] `output_contracts.zig`: add the "OpenRouter" label and connected status in text and JSON.
-- [ ] `commands.zig`: update `--provider` and `fx provider` usage text.
-- [ ] Test seam: `FX_E2E_OPENROUTER_BASE_URL`, accepted only for loopback URLs.
+- [x] `model_provider.zig`: add `ProviderId.openrouter`, including `label`, `parse`, `parse_saved`, and `authorizesCredential`. Update every exhaustive `switch` and every ad-hoc `source != ...` check (`auth_runtime.zig`, `output_contracts.zig`).
+- [x] `configured_provider.zig`: reserve `openrouter`. When a profile already defines it, return a dedicated error that tells the user to rename or delete the custom connection.
+- [x] `provider_set.zig`: add the `openrouter` Bundle slot, `AuthStrategy.openrouter`, and a `select` arm.
+- [x] `types.zig` and `credentials.zig`: add the `openrouter_api_key` (`OPENROUTER_API_KEY`) and `openrouter_login` (secret store) sources, including load, exists, missing-credential messages, and the auth-file mapping. Nothing writes `openrouter_login` until Milestone 2.
+- [x] Default model `anthropic/claude-sonnet-5.5` when `models.openrouter` is unset.
+- [x] `provider_catalog.zig` and `provider_picker_catalog.zig`: add the OpenRouter row, and update the picker rows that are hardcoded by index.
+- [x] `settings_store.zig`: add `models.openrouter` persistence.
+- [x] ACP: add the provider option in `src/acp/sessions.zig` and the missing-credential branches in `server.zig` and `prompt.zig`.
+- [x] `output_contracts.zig`: add the "OpenRouter" label and connected status in text and JSON.
+- [x] `commands.zig`: update `--provider` and `fx provider` usage text.
+- [x] Test seam: `FX_E2E_OPENROUTER_BASE_URL`, accepted only for loopback URLs.
+
+Note: until Milestone 3 brings the live catalog, the OpenRouter catalog lists only the default model. `fx provider openrouter` keeps a saved model, but a `/provider` switch in the TUI selects the default.
 
 Deliverables and tests:
 

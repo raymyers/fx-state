@@ -372,13 +372,29 @@ fn finalizeAgentRequestBody(
     return identified;
 }
 
-test "configured credentials cannot authorize the Gateway transport" {
+test "configured and OpenRouter credentials cannot authorize the Gateway transport" {
     var cancelled: std.atomic.Value(bool) = .init(false);
     var delivery: agent_stream_provider_contract.DeliveryCertainty = .{};
     var evidence: agent_stream_provider_contract.AttemptEvidence = .{};
     const Ignore = struct {
         fn event(_: *anyopaque, _: agent_stream_provider_contract.Event) void {}
     };
+    for ([_]shared_types.CredentialSource{ .openrouter_api_key, .openrouter_login }) |source| {
+        try std.testing.expectError(error.OpenRouterCredentialCannotAuthorizeGateway, streamAgentCompletion(null, std.testing.allocator, .{
+            .credential = .{ .direct = .{ .secret_bytes = "sk-or-token", .source = source } },
+            .model = "anthropic/claude-sonnet-5.5",
+            .retry_count = 1,
+            .messages = &.{},
+            .tool_choice = .auto,
+            .provider_options = .{},
+            .trace_ctx = .{},
+            .content_capture_limit = null,
+            .delivery = &delivery,
+            .attempt_evidence = &evidence,
+            .events = .{ .context = &cancelled, .emit_fn = Ignore.event },
+            .cancel_flag = &cancelled,
+        }));
+    }
     try std.testing.expectError(error.ConfiguredCredentialCannotAuthorizeGateway, streamAgentCompletion(null, std.testing.allocator, .{
         .credential = .{ .direct = .{ .secret_bytes = "configured-token", .source = .configured } },
         .model = "local-model",
@@ -573,6 +589,7 @@ fn streamAgentCompletion(
     const shared_pool: ?*http_pool.HttpPool = if (context) |ctx| @ptrCast(@alignCast(ctx)) else null;
     const credential_source = request.credential.credentialSource();
     if (credential_source == .configured) return agent_stream_provider_contract.failResult(error.ConfiguredCredentialCannotAuthorizeGateway);
+    if (credential_source != null and credential_source.?.isOpenRouter()) return agent_stream_provider_contract.failResult(error.OpenRouterCredentialCannotAuthorizeGateway);
     if (credential_source == .chatgpt_subscription or credential_source == .grok_subscription) {
         return agent_stream_provider_contract.failResult(
             error.SubscriptionCredentialCannotAuthorizeGateway,

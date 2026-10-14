@@ -356,7 +356,7 @@ pub const top_level_flags = [_]TopLevelFlag{
     },
     .{
         .usage = "--provider <name>",
-        .description = "Override the model provider for an interactive session (gateway, codex, grok, or a configured name)",
+        .description = "Override the model provider for an interactive session (gateway, codex, grok, openrouter, or a configured name)",
     },
     .{
         .usage = "--model <id>",

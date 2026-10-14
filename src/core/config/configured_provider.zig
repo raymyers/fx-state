@@ -20,6 +20,8 @@ pub const ParseError = Allocator.Error || error{
     MissingField,
     InvalidProviderId,
     ReservedProviderId,
+    /// A profile names a custom connection "openrouter", which is now built in.
+    OpenRouterConnectionConflict,
     InvalidProtocol,
     InvalidBaseUrl,
     InsecureBaseUrl,
@@ -32,6 +34,8 @@ pub const ParseError = Allocator.Error || error{
 
 pub const Protocol = enum { @"openai-chat-completions" };
 pub const ToolChoiceMode = enum { omit, send };
+/// A built-in provider that reuses this connection shape with a fixed endpoint.
+pub const Builtin = enum { openrouter };
 
 /// Describes a credential slot, never a credential value. Resolution belongs at
 /// the effectful edge; `none` must omit Authorization rather than supply a token.
@@ -58,6 +62,8 @@ pub const Definition = struct {
     tool_choice_mode: ToolChoiceMode = .omit,
     reviewer_model: ?[]const u8 = null,
     model_metadata: []const ModelMetadata = &.{},
+    /// Set only on built-in definitions; profile settings never produce one.
+    builtin: ?Builtin = null,
 
     /// Caller owns the returned URL. base_url is already a validated API prefix.
     pub fn chat_url(self: Definition, alloc: Allocator) Allocator.Error![]u8 {
@@ -164,6 +170,8 @@ pub const Registry = struct {
 };
 
 fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) ParseError!Definition {
+    // Profiles written before OpenRouter was built in may already use the name.
+    if (std.ascii.eqlIgnoreCase(id, "openrouter")) return error.OpenRouterConnectionConflict;
     try validate_id(id);
     try check_fields(value, &.{ "protocol", "base_url", "auth", "tool_choice_mode", "reviewer_model", "model_metadata" });
     const protocol = try required(value, "protocol");
@@ -293,7 +301,7 @@ pub fn validate_id(id: []const u8) error{ LimitExceeded, InvalidProviderId, Rese
     for (id) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return error.InvalidProviderId;
     }
-    for ([_][]const u8{ "gateway", "codex", "grok" }) |reserved| {
+    for ([_][]const u8{ "gateway", "codex", "grok", "openrouter" }) |reserved| {
         if (std.ascii.eqlIgnoreCase(id, reserved)) return error.ReservedProviderId;
     }
 }
@@ -490,6 +498,8 @@ test "configured provider invalid schemas fail explicitly" {
         .{ .json = "{\"GATEWAY\":{}}", .err = error.ReservedProviderId },
         .{ .json = "{\"codex\":{}}", .err = error.ReservedProviderId },
         .{ .json = "{\"Grok\":{}}", .err = error.ReservedProviderId },
+        .{ .json = "{\"openrouter\":{\"protocol\":\"openai-chat-completions\",\"base_url\":\"https://openrouter.ai/api/v1\",\"auth\":{\"type\":\"bearer\",\"env\":\"OPENROUTER_API_KEY\"}}}", .err = error.OpenRouterConnectionConflict },
+        .{ .json = "{\"OpenRouter\":{}}", .err = error.OpenRouterConnectionConflict },
         .{ .json = "{\"local\":null}", .err = error.InvalidObject },
         .{ .json = "{\"local\":{}}", .err = error.MissingField },
         .{ .json = "{\"local\":{\"protocol\":\"responses\"}}", .err = error.InvalidProtocol },
