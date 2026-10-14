@@ -35,7 +35,8 @@ Goal: the existing chat-completions path handles OpenRouter's streams, errors, a
 
 Tasks:
 
-- [ ] Record real OpenRouter SSE streams for an Anthropic, OpenAI, Gemini, and open-weights model, covering text, tool calls, reasoning, a mid-stream error, and a trailing usage chunk. Remove ids and keys, and save them under `src/gateway/testdata/openrouter/`.
+- [x] Record real OpenRouter SSE streams for an Anthropic, OpenAI, Gemini, and open-weights model, covering text, tool calls, reasoning, a mid-stream error, and a trailing usage chunk. Remove ids and keys, and save them under `src/gateway/testdata/openrouter/`.
+  - Recorded on 2026-10-14: anthropic/claude-haiku-5.5 (text with reasoning, and a tool call), openai/gpt-5-nano (tool call with encrypted reasoning), google/gemini-3.1-flash-lite (text), and qwen/qwen3.7-flash (tool call). Generation, tool call, and reasoning item ids are replaced. No real stream produced a mid-stream error, so that shape stays covered by synthetic tests.
 - [x] `chat_completions_protocol.zig`: accept `finish_reason: "error"` and map it to a typed failure that keeps `error.message` and `error.code`.
 - [x] Keep the message from a mid-stream `{"error":...}` object instead of returning a bare `ProviderError`.
 - [x] After a finish, accept trailing chunks with empty or null-only deltas and a repeated identical `finish_reason`. Any other content after the finish is still rejected.

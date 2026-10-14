@@ -2549,6 +2549,42 @@ test "chat completions OpenRouter dialect sends reasoning effort and cache break
     }
 }
 
+test "chat completions replays recorded OpenRouter streams" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        name: []const u8,
+        wire: []const u8,
+        finish: types.ProviderFinishReason,
+        content: bool,
+        tool_calls: usize,
+        reasoning: bool,
+    }{
+        .{ .name = "anthropic text with reasoning", .wire = @embedFile("testdata/openrouter/anthropic-text-reasoning.sse"), .finish = .stop, .content = true, .tool_calls = 0, .reasoning = true },
+        .{ .name = "anthropic tool call", .wire = @embedFile("testdata/openrouter/anthropic-tool-reasoning.sse"), .finish = .tool_calls, .content = false, .tool_calls = 1, .reasoning = false },
+        .{ .name = "openai tool call with encrypted reasoning", .wire = @embedFile("testdata/openrouter/openai-tool-reasoning.sse"), .finish = .tool_calls, .content = false, .tool_calls = 1, .reasoning = true },
+        .{ .name = "gemini text", .wire = @embedFile("testdata/openrouter/gemini-text.sse"), .finish = .stop, .content = true, .tool_calls = 0, .reasoning = true },
+        .{ .name = "qwen tool call", .wire = @embedFile("testdata/openrouter/qwen-tool.sse"), .finish = .tool_calls, .content = false, .tool_calls = 1, .reasoning = true },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("recording: {s}\n", .{case.name});
+        var source = std.Io.Reader.fixed(case.wire);
+        var cancel = std.atomic.Value(bool).init(false);
+        var result = try consume_stream(alloc, &source, test_tool_request(), .{}, null, &cancel);
+        defer result.deinit(alloc);
+        const completion = result.completed.completion;
+        try std.testing.expectEqual(case.finish, completion.finish_reason.?);
+        try std.testing.expectEqual(case.content, completion.content != null);
+        try std.testing.expectEqual(case.tool_calls, completion.tool_calls.len);
+        for (completion.tool_calls) |call| {
+            try std.testing.expectEqualStrings("read_file", call.name);
+            try std.testing.expect(std.mem.find(u8, call.arguments_json, "notes.txt") != null);
+        }
+        try std.testing.expect(completion.usage.input_tokens.? > 0 and completion.usage.output_tokens.? > 0);
+        try std.testing.expect(completion.usage.cost.? > 0);
+        try std.testing.expectEqual(case.reasoning, completion.provider_state_json != null and std.mem.find(u8, completion.provider_state_json.?, "reasoning") != null);
+    }
+}
+
 test "chat completions accepts empty trailing chunks after the finish" {
     const alloc = std.testing.allocator;
     var reducer = try Reducer.init(alloc, test_request(), .{});
