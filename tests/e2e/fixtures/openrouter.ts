@@ -27,6 +27,7 @@ export function openRouterCatalog(models: CatalogModel[] = defaultCatalog) {
       architecture: { input_modalities: model.image ? ["text", "image"] : ["text"], output_modalities: ["text"] },
       top_provider: { context_length: model.context_length ?? 128_000, max_completion_tokens: model.max_completion_tokens ?? 16_384 },
       supported_parameters: ["max_tokens", "tool_choice", "tools", ...(model.reasoning ? ["reasoning"] : [])],
+      ...(model.reasoning ? { reasoning: { mandatory: true, supported_efforts: ["high", "medium", "low"], default_effort: "medium" } } : {}),
       pricing: { prompt: "0.000003", completion: "0.000015" },
     })),
   });

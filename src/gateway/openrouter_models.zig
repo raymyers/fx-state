@@ -10,6 +10,7 @@ const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const model_catalog_metadata = @import("../core/gateway/model_catalog_metadata.zig");
 const profile_paths = @import("../core/shared/profile_paths.zig");
+const types = @import("../core/shared/types.zig");
 const gateway_client = @import("client.zig");
 
 const Allocator = std.mem.Allocator;
@@ -76,9 +77,26 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !std.ArrayList(model_catalog.M
             if (trimmed.len != 0 and printable(trimmed)) entry.name = try alloc.dupe(u8, trimmed);
         }
         errdefer if (entry.name) |name| alloc.free(name);
+        if (entry.has_reasoning) try appendEfforts(alloc, &entry, objectField(model, "reasoning"));
+        errdefer entry.reasoning_efforts.deinit(alloc);
         try entries.append(alloc, entry);
     }
     return entries;
+}
+
+/// The efforts the model lists, in catalog order. A model that always reasons
+/// rejects "none", so it is never offered for one.
+fn appendEfforts(alloc: Allocator, entry: *model_catalog.ModelCatalogEntry, reasoning: ?std.json.ObjectMap) !void {
+    const metadata = reasoning orelse return;
+    const mandatory = if (metadata.get("mandatory")) |value| value == .bool and value.bool else false;
+    for (arrayField(metadata, "supported_efforts") orelse return) |value| {
+        if (entry.reasoning_efforts.items.len == types.ReasoningEffort.max_options) break;
+        if (value != .string) continue;
+        if (mandatory and std.mem.eql(u8, value.string, "none")) continue;
+        const effort = types.ReasoningEffort.parse(value.string) orelse continue;
+        if (effort.isDefault()) continue;
+        try entry.reasoning_efforts.append(alloc, effort);
+    }
 }
 
 fn stringField(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -336,6 +354,28 @@ test "OpenRouter catalog parsing maps limits and modalities and drops models wit
     const pareto = entries.items[1];
     try std.testing.expect(pareto.has_vision and !pareto.has_reasoning and !pareto.has_file_input);
     try std.testing.expectEqual(@as(u32, 131_072), pareto.max_tokens);
+}
+
+test "OpenRouter reasoning efforts follow the catalog and never offer none to mandatory models" {
+    const alloc = std.testing.allocator;
+    var fixture = try parse(alloc, @embedFile("testdata/openrouter/models.json"));
+    defer model_catalog.freeModelCatalog(alloc, &fixture);
+    try std.testing.expectEqual(@as(usize, 5), fixture.items[0].reasoning_efforts.items.len);
+    try std.testing.expectEqualStrings("max", fixture.items[0].reasoning_efforts.items[0].label());
+    var entries = try parse(alloc,
+        \\{"data":[
+        \\{"id":"optional/model","supported_parameters":["tools","reasoning"],"reasoning":{"supported_efforts":["high","none"]}},
+        \\{"id":"mandatory/model","supported_parameters":["tools","reasoning"],"reasoning":{"mandatory":true,"supported_efforts":["high","none","bad value",7]}},
+        \\{"id":"unlisted/model","supported_parameters":["tools","reasoning"],"reasoning":{"mandatory":true}},
+        \\{"id":"plain/model","supported_parameters":["tools"],"reasoning":{"supported_efforts":["high"]}}]}
+    );
+    defer model_catalog.freeModelCatalog(alloc, &entries);
+    const expected = [_][]const []const u8{ &.{ "high", "none" }, &.{"high"}, &.{}, &.{} };
+    for (entries.items, expected) |entry, efforts| {
+        try std.testing.expectEqual(efforts.len, entry.reasoning_efforts.items.len);
+        for (entry.reasoning_efforts.items, efforts) |effort, label| try std.testing.expectEqualStrings(label, effort.label());
+    }
+    try std.testing.expect(!entries.items[3].has_reasoning);
 }
 
 test "OpenRouter catalog parsing tolerates missing fields and rejects malformed roots" {

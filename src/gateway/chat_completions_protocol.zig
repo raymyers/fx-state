@@ -3,6 +3,7 @@ const testing_allocator = @import("../core/shared/testing_allocator.zig");
 const stream_provider = @import("../core/agent/stream_provider.zig");
 const types = @import("../core/shared/types.zig");
 const model_tool_schema = @import("../core/tooling/model_tool_schema.zig");
+const model_capabilities = @import("../core/config/model_capabilities.zig");
 const tool_result_errors = @import("../core/tooling/tool_result_errors.zig");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const tool_call_ids = @import("tool_call_ids.zig");
@@ -15,8 +16,13 @@ const text_utils = @import("../core/shared/text_utils.zig");
 const Allocator = std.mem.Allocator;
 
 pub const ToolChoiceMode = configured_provider.ToolChoiceMode;
+/// `openrouter` accepts reasoning effort and prompt-cache breakpoints, which
+/// generic chat completions endpoints would reject.
+pub const Dialect = enum { standard, openrouter };
+
 pub const Options = struct {
     tool_choice_mode: ToolChoiceMode = .omit,
+    dialect: Dialect = .standard,
     /// Borrowed only during serialization; includes the configured authority binding.
     provider: ?*const model_provider.ProviderId = null,
 };
@@ -165,9 +171,7 @@ fn validate_dynamic_schema(value: std.json.Value, depth: usize, budget: *SchemaB
 fn validate_request(request: stream_provider.RequestData) Error!void {
     try request.validatePrompt();
     configured_provider.validate_model_id(request.model) catch return error.InvalidModel;
-    const options = request.provider_options;
-    if (options.reasoning != null or options.fast or options.prompt_caching) return error.UnsupportedProviderOption;
-    if (options.provider_order.len != 0) return error.UnsupportedProviderOption;
+    if (request.provider_options.fast or request.provider_options.provider_order.len != 0) return error.UnsupportedProviderOption;
     if (request.response_format != null) return error.UnsupportedResponseFormat;
     // The vision tool runs through a separate provider request; inline image
     // content on user and tool-result messages serializes natively below.
@@ -395,6 +399,7 @@ fn write_replay(writer: *std.Io.Writer, alloc: Allocator, message: types.ChatMes
 /// Deadline enforcement and prepared-body reuse belong to the transport owner.
 pub fn build_request(alloc: Allocator, input: stream_provider.RequestData, options: Options) Error![]u8 {
     try validate_request(input);
+    if (options.dialect == .standard and (input.provider_options.reasoning != null or input.provider_options.prompt_caching)) return error.UnsupportedProviderOption;
     var projected: ?[]types.ChatMessage = null;
     if (options.provider) |provider| {
         projected = try types.projectProviderReplay(alloc, input.messages, .{ .provider = provider.*, .model = input.model });
@@ -459,6 +464,7 @@ fn write_user_content_parts(
     writer: *std.Io.Writer,
     alloc: Allocator,
     message: types.ChatMessage,
+    breakpoint: bool,
 ) !void {
     try writer.writeByte('[');
     var wrote_part = false;
@@ -466,6 +472,7 @@ fn write_user_content_parts(
         if (content.len > 0) {
             try writer.writeAll("{\"type\":\"text\",\"text\":");
             try std.json.Stringify.value(content, .{}, writer);
+            if (breakpoint) try writer.writeAll("," ++ cache_control);
             try writer.writeByte('}');
             wrote_part = true;
         }
@@ -528,8 +535,15 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
     var pending_images: std.ArrayList(types.ToolImage) = .empty;
     defer pending_images.deinit(alloc);
     const lanes = [_][]const types.ChatMessage{ request.instructions, request.messages };
+    const breakpoints = if (options.dialect == .openrouter and request.provider_options.prompt_caching and explicit_cache_model(request.model))
+        cache_breakpoints(&lanes)
+    else
+        no_breakpoints;
+    var position: usize = 0;
     for (lanes) |lane| {
         for (lane) |message| {
+            const breakpoint = std.mem.findScalar(usize, &breakpoints, position) != null;
+            position += 1;
             // Source validation rejects empty assistants; only stripped replay can leave one here.
             if (message.role == .assistant and message.content == null and message.tool_calls.len == 0 and message.provider_replay == null) continue;
             if (message.role != .tool) try flush_tool_image_follow_up(writer, alloc, &count, &pending_names, &pending_images);
@@ -539,7 +553,11 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
             try std.json.Stringify.value(@tagName(message.role), .{}, writer);
             try writer.writeAll(",\"content\":");
             if (message.role == .user and message.images.len != 0) {
-                try write_user_content_parts(writer, alloc, message);
+                try write_user_content_parts(writer, alloc, message, breakpoint);
+            } else if (breakpoint) {
+                try writer.writeAll("[{\"type\":\"text\",\"text\":");
+                try std.json.Stringify.value(message.content.?, .{}, writer);
+                try writer.writeAll("," ++ cache_control ++ "}]");
             } else {
                 try std.json.Stringify.value(message.content, .{}, writer);
             }
@@ -603,7 +621,61 @@ fn write_request(writer: *std.Io.Writer, alloc: Allocator, request: stream_provi
         }
     }
     if (request.max_output_tokens) |limit| try writer.print(",\"max_tokens\":{d}", .{limit});
+    if (options.dialect == .openrouter) {
+        if (request.provider_options.reasoning) |effort| {
+            try writer.writeAll(",\"reasoning\":{\"effort\":");
+            try std.json.Stringify.value(effort.label(), .{}, writer);
+            try writer.writeByte('}');
+        }
+    }
     try writer.writeByte('}');
+}
+
+const cache_control = "\"cache_control\":{\"type\":\"ephemeral\"}";
+/// Indexes across both lanes; unused slots hold a position no message has.
+const max_cache_breakpoints = 3;
+const no_breakpoints: [max_cache_breakpoints]usize = @splat(std.math.maxInt(usize));
+
+/// Anthropic, Gemini, and Qwen cache only behind explicit breakpoints; other
+/// families cache automatically and must not receive them.
+fn explicit_cache_model(model: []const u8) bool {
+    for ([_][]const u8{ "anthropic/", "google/", "qwen/" }) |prefix| {
+        if (std.mem.startsWith(u8, model, prefix)) return true;
+    }
+    return false;
+}
+
+/// The last system message and the last two user or tool messages with text,
+/// within Anthropic's limit of four breakpoints. OpenRouter documents cache
+/// control only on content blocks, so tool definitions get none.
+fn cache_breakpoints(lanes: []const []const types.ChatMessage) [max_cache_breakpoints]usize {
+    var result = no_breakpoints;
+    var total: usize = 0;
+    for (lanes) |lane| total += lane.len;
+    var conversation: usize = 0;
+    var system_found = false;
+    var position = total;
+    var lane_index = lanes.len;
+    while (lane_index > 0) {
+        lane_index -= 1;
+        const lane = lanes[lane_index];
+        var index = lane.len;
+        while (index > 0) {
+            index -= 1;
+            position -= 1;
+            const message = lane[index];
+            const content = message.content orelse continue;
+            if (content.len == 0) continue;
+            if (message.role == .system and !system_found) {
+                system_found = true;
+                result[0] = position;
+            } else if ((message.role == .user or message.role == .tool) and conversation < 2) {
+                conversation += 1;
+                result[conversation] = position;
+            }
+        }
+    }
+    return result;
 }
 
 pub const Limits = struct {
@@ -2408,6 +2480,55 @@ test "chat completions usage keeps cost cache and reasoning details" {
         const chunk = try alloc.print("{{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"x\"}}}}],\"usage\":{s}}}", .{invalid});
         defer alloc.free(chunk);
         try std.testing.expectError(error.InvalidChunk, rejected.accept(chunk, false));
+    }
+}
+
+test "chat completions OpenRouter dialect sends reasoning effort and cache breakpoints" {
+    const alloc = std.testing.allocator;
+    const instructions = [_]types.ChatMessage{
+        .{ .role = .system, .content = "first rules" },
+        .{ .role = .system, .content = "last rules" },
+    };
+    const messages = [_]types.ChatMessage{
+        .{ .role = .user, .content = "one" },
+        .{ .role = .assistant, .content = "reply" },
+        .{ .role = .user, .content = "two" },
+        .{ .role = .assistant, .content = "reply" },
+        .{ .role = .user, .content = "three" },
+    };
+    var request = test_request();
+    request.instructions = &instructions;
+    request.messages = &messages;
+    request.provider_options = .{ .reasoning = .literal("high"), .prompt_caching = true };
+    for ([_]struct { model: []const u8, breakpoints: usize }{
+        .{ .model = "anthropic/claude-sonnet-5.5", .breakpoints = 3 },
+        .{ .model = "google/gemini-4-argon", .breakpoints = 3 },
+        .{ .model = "qwen/qwen3-max", .breakpoints = 3 },
+        .{ .model = "openai/gpt-5", .breakpoints = 0 },
+    }) |case| {
+        request.model = case.model;
+        const body = try build_request(alloc, request, .{ .dialect = .openrouter });
+        defer alloc.free(body);
+        try std.testing.expectEqual(case.breakpoints, std.mem.count(u8, body, "\"cache_control\""));
+        try std.testing.expect(std.mem.endsWith(u8, body, ",\"reasoning\":{\"effort\":\"high\"}}"));
+        if (case.breakpoints != 0) {
+            for ([_][]const u8{ "last rules", "two", "three" }) |text| {
+                const marked = try alloc.print("{{\"type\":\"text\",\"text\":\"{s}\",\"cache_control\":{{\"type\":\"ephemeral\"}}}}", .{text});
+                defer alloc.free(marked);
+                try std.testing.expect(std.mem.find(u8, body, marked) != null);
+            }
+            try std.testing.expect(std.mem.find(u8, body, "\"content\":\"first rules\"") != null);
+            try std.testing.expect(std.mem.find(u8, body, "\"content\":\"one\"") != null);
+        }
+    }
+    request.model = "anthropic/claude-sonnet-5.5";
+    request.provider_options = .{};
+    const plain = try build_request(alloc, request, .{ .dialect = .openrouter });
+    defer alloc.free(plain);
+    try std.testing.expect(std.mem.find(u8, plain, "cache_control") == null and std.mem.find(u8, plain, "\"reasoning\"") == null);
+    for ([_]model_capabilities.ResolvedProviderOptions{ .{ .reasoning = .literal("high") }, .{ .prompt_caching = true } }) |options| {
+        request.provider_options = options;
+        try std.testing.expectError(error.UnsupportedProviderOption, build_request(alloc, request, .{}));
     }
 }
 

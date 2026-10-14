@@ -136,10 +136,11 @@ Goal: reasoning models think and continue their reasoning across tool calls, and
 
 Tasks:
 
-- [ ] Remove the `reasoning` rejection for the OpenRouter dialect only. Map fx effort levels to `reasoning.effort`, gated on the catalog's `reasoning` parameter. Do not send `none` to models that require reasoning.
-- [ ] Confirm that `reasoning_details` replay works when the provider identity is `openrouter`. The binding identity currently uses the configured definition.
-- [ ] Add `cache_control` breakpoints for `anthropic/*`, `google/*`, and `qwen/*`: the last system part, the last tool, and the last two user or tool messages, with at most four in total.
-- [ ] Set `capabilities.gateway_prompt_caching`, or a new OpenRouter-specific flag, so the UI and `/usage` show cache data.
+- [x] Remove the `reasoning` rejection for the OpenRouter dialect only. Map fx effort levels to `reasoning.effort`, gated on the catalog's `reasoning` parameter. Do not send `none` to models that require reasoning.
+- [x] Confirm that `reasoning_details` replay works when the provider identity is `openrouter`. The binding identity currently uses the configured definition.
+- [x] Add `cache_control` breakpoints for `anthropic/*`, `google/*`, and `qwen/*`: the last system part, the last tool, and the last two user or tool messages, with at most four in total.
+  - OpenRouter documents `cache_control` only on content blocks, so tool definitions get no breakpoint; at most three are sent.
+- [x] Set `capabilities.gateway_prompt_caching`, or a new OpenRouter-specific flag, so the UI and `/usage` show cache data.
 
 Deliverables and tests:
 

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FX_BIN, runFx } from "../evals/eval-helpers";
-import { openRouterCompletion } from "./fixtures/chat-completions";
+import { openRouterCompletion, toolCompletion } from "./fixtures/chat-completions";
 import { createOpenRouterFixture as fixture, openRouterCatalog } from "./fixtures/openrouter";
 
 type Fixture = ReturnType<typeof fixture>;
@@ -277,4 +277,41 @@ describe("openrouter provider", () => {
       expect(chats.every((request) => request.body.model === "tiny/model" && request.body.max_tokens > 0 && request.body.max_tokens <= 512)).toBe(true);
     } finally { f.close(); }
   }, 120000);
+
+  test("reasoning effort, cache breakpoints, and reasoning details reach OpenRouter", async () => {
+    const detail = { type: "reasoning.encrypted", data: "opaque-openrouter-reasoning", id: "reasoning-1", format: "anthropic-claude-v1", index: 0 };
+    let calls = 0;
+    const f = fixture((body) => {
+      calls++;
+      if (calls === 1) {
+        const prefix = `data: ${JSON.stringify({ id: "chat-tool", choices: [{ index: 0, delta: { reasoning: "Read it first.", reasoning_details: [detail] } }] })}\n\n`;
+        const call = toolCompletion(body.model, "read_file", { path: "note.txt" }, "call-or-1");
+        return call.text().then((text) => new Response(prefix + text, { headers: call.headers }));
+      }
+      return openRouterCompletion(body.model, "done reading");
+    });
+    try {
+      writeFileSync(join(f.workspace, "note.txt"), "fixture contents");
+      const result = await runFx(["ask", "--json", "--no-save", "--effort", "high", "Read note.txt"], { cwd: f.workspace, env: { ...f.env, FX_PROVIDER: "openrouter" }, timeoutMs: 20000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      expect(JSON.parse(result.stdout).output).toBe("done reading");
+      const chats = f.requests.filter((request) => request.path === "/api/v1/chat/completions");
+      expect(chats).toHaveLength(2);
+      for (const chat of chats) {
+        expect(chat.body.reasoning).toEqual({ effort: "high" });
+        const breakpoints = JSON.stringify(chat.body).split("\"cache_control\"").length - 1;
+        expect(breakpoints).toBeGreaterThan(0);
+        expect(breakpoints).toBeLessThanOrEqual(4);
+      }
+      const toolTurn = chats[1].body.messages.find((message: any) => message.role === "assistant" && message.tool_calls?.length);
+      expect(toolTurn.reasoning_details).toEqual([detail]);
+      expect(toolTurn.reasoning).toBe("Read it first.");
+
+      f.settings.models = { openrouter: "openai/gpt-5" };
+      f.save();
+      const other = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env: { ...f.env, FX_PROVIDER: "openrouter" }, timeoutMs: 20000 });
+      if (other.code !== 0) throw new Error(other.stdout + other.stderr);
+      expect(JSON.stringify(f.requests.at(-1)!.body)).not.toContain("cache_control");
+    } finally { f.close(); }
+  }, 45000);
 });

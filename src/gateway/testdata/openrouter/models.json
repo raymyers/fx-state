@@ -43,6 +43,17 @@
     "input_cache_read": "0.0000001",
     "input_cache_write": "0.0000025",
     "input_cache_write_1h": "0.000004"
+   },
+   "reasoning": {
+    "mandatory": true,
+    "supported_efforts": [
+     "max",
+     "xhigh",
+     "high",
+     "medium",
+     "low"
+    ],
+    "default_effort": "high"
    }
   },
   {
