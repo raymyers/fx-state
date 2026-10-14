@@ -10,6 +10,7 @@ const provider_catalog = @import("../core/auth/provider_catalog.zig");
 const chat_completions = @import("../gateway/chat_completions.zig");
 const configured_provider = @import("../core/config/configured_provider.zig");
 const openrouter = @import("../gateway/openrouter.zig");
+const openrouter_models = @import("../gateway/openrouter_models.zig");
 
 fn configuredBundle(_: ?*anyopaque, definition: *const configured_provider.Definition) provider_set.Bundle {
     return chat_completions.bundle(definition);
@@ -43,5 +44,8 @@ fn openrouterBundle() provider_set.Bundle {
     var bundle = chat_completions.bundle(&openrouter.definition);
     bundle.presentation = provider_catalog.find(.openrouter);
     bundle.auth_strategy = .openrouter;
+    bundle.model_catalog = openrouter_models.model_catalog_provider;
+    bundle.cli_model_catalog = openrouter_models.cli_model_catalog_provider;
+    bundle.fallback_model_capabilities_fn = openrouter_models.capabilitiesFor;
     return bundle;
 }

@@ -5,13 +5,37 @@ import { openRouterCompletion } from "./chat-completions";
 
 import { createHash } from "node:crypto";
 
-export type OpenRouterRequest = { path: string; authorization: string | null; body: any };
+export type OpenRouterRequest = { path: string; authorization: string | null; body: any; headers: Record<string, string> };
 
 type PendingCode = { challenge: string; method: string; used: boolean };
 
+export type CatalogModel = { id: string; context_length?: number; max_completion_tokens?: number; image?: boolean; reasoning?: boolean };
+
+export const defaultCatalog: CatalogModel[] = [
+  { id: "anthropic/claude-sonnet-5.5", context_length: 1_000_000, max_completion_tokens: 128_000, image: true, reasoning: true },
+  { id: "openai/gpt-5", context_length: 400_000, max_completion_tokens: 128_000, image: true, reasoning: true },
+];
+
+// The shape of GET /api/v1/models?supported_parameters=tools.
+export function openRouterCatalog(models: CatalogModel[] = defaultCatalog) {
+  return Response.json({
+    data: models.map((model) => ({
+      id: model.id,
+      name: model.id,
+      created: 1_790_000_000,
+      context_length: model.context_length ?? 128_000,
+      architecture: { input_modalities: model.image ? ["text", "image"] : ["text"], output_modalities: ["text"] },
+      top_provider: { context_length: model.context_length ?? 128_000, max_completion_tokens: model.max_completion_tokens ?? 16_384 },
+      supported_parameters: ["max_tokens", "tool_choice", "tools", ...(model.reasoning ? ["reasoning"] : [])],
+      pricing: { prompt: "0.000003", completion: "0.000015" },
+    })),
+  });
+}
+
 // A fake OpenRouter API. fx reaches it through FX_E2E_OPENROUTER_BASE_URL,
 // which accepts only loopback URLs.
-export function createOpenRouterFixture(respond?: (body: any) => Response | Promise<Response>) {
+// A null catalog makes GET /models fail with 503.
+export function createOpenRouterFixture(respond?: (body: any) => Response | Promise<Response>, catalog: CatalogModel[] | null = defaultCatalog) {
   const home = realpathSync(createIsolatedTestHome());
   const workspace = join(home, "workspace");
   mkdirSync(workspace);
@@ -28,7 +52,8 @@ export function createOpenRouterFixture(respond?: (body: any) => Response | Prom
       const url = new URL(request.url);
       const path = url.pathname;
       const body = request.method === "POST" ? await request.json() : null;
-      requests.push({ path, authorization: request.headers.get("authorization"), body });
+      requests.push({ path, authorization: request.headers.get("authorization"), body, headers: Object.fromEntries(request.headers) });
+      if (path === "/api/v1/models") return catalog ? openRouterCatalog(catalog) : new Response("unavailable", { status: 503 });
       if (path === "/auth") {
         authorizations.push(url.searchParams);
         const code = `code-${++issued}`;

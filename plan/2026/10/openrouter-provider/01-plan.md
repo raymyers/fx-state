@@ -68,8 +68,6 @@ Tasks:
 - [x] `commands.zig`: update `--provider` and `fx provider` usage text.
 - [x] Test seam: `FX_E2E_OPENROUTER_BASE_URL`, accepted only for loopback URLs.
 
-Note: until Milestone 3 brings the live catalog, the OpenRouter catalog lists only the default model. `fx provider openrouter` keeps a saved model, but a `/provider` switch in the TUI selects the default.
-
 Deliverables and tests:
 
 - Unit tests: provider parse and saved-session round trip, reserved-id error with its rename hint, default model selection, credential precedence (env over stored), and gateway rejecting OpenRouter credentials.
@@ -113,15 +111,16 @@ Goal: OpenRouter works without hand-written metadata, and `/model` shows the liv
 
 Tasks:
 
-- [ ] `src/gateway/openrouter_models.zig`: fetch `/models?supported_parameters=tools` (1 MiB cap, 30-second timeout) and map entries to `ModelCapabilities` (context window, output limit, vision, reasoning).
-- [ ] Cache the catalog on disk under `~/.fx/` with a time-to-live and use the stale copy if a fetch fails. Fetch only when `openrouter` is the active provider, to protect the startup budget.
-- [ ] Provide `cli_model_catalog` and `model_catalog`, so `/model` and `fx models` list catalog models with their context size.
+- [x] `src/gateway/openrouter_models.zig`: fetch `/models?supported_parameters=tools` (1 MiB cap, 30-second timeout) and map entries to `ModelCapabilities` (context window, output limit, vision, reasoning).
+- [x] Cache the catalog on disk under `~/.fx/` with a time-to-live and use the stale copy if a fetch fails. Fetch only when `openrouter` is the active provider, to protect the startup budget.
+- [x] Provide `cli_model_catalog` and `model_catalog`, so `/model` and `fx models` list catalog models with their context size.
 - [ ] `src/gateway/openrouter.zig`: wrap the shared protocol. Add the `HTTP-Referer` and `X-OpenRouter-Title` headers, always send `tool_choice`, take `max_tokens` from the catalog, and reuse a pooled HTTP client.
+  - Done: attribution headers, `tool_choice`, and `max_tokens` from catalog capabilities. Open: the pooled HTTP client; each request still opens its own connection.
 - [ ] When a model is missing from the catalog, warn once and fall back to unknown limits.
 - [ ] `src/gateway/openrouter_permission_reviewer.zig`: use a fixed reviewer model (spec open question 1) with a forced tool call.
 - [ ] Set `title_model` on the bundle.
-- [ ] `src/builtins/providers.zig`: wire the native bundle.
-- [ ] Fill the compactor's window from catalog capabilities, so automatic compaction runs.
+- [x] `src/builtins/providers.zig`: wire the native bundle.
+- [x] Fill the compactor's window from catalog capabilities, so automatic compaction runs.
 
 Deliverables and tests:
 

@@ -4906,6 +4906,7 @@ test {
     _ = @import("core/auth/openrouter_session.zig");
     _ = @import("core/auth/openrouter_oauth.zig");
     _ = @import("gateway/openrouter.zig");
+    _ = @import("gateway/openrouter_models.zig");
     _ = @import("core/config/openrouter_endpoints.zig");
     _ = @import("gateway/xai_grok_models.zig");
     _ = @import("gateway/xai_grok.zig");

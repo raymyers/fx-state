@@ -3,7 +3,6 @@
 const std = @import("std");
 const definitions = @import("../core/config/configured_provider.zig");
 const endpoints = @import("../core/config/openrouter_endpoints.zig");
-const model_provider = @import("../core/config/model_provider.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -13,10 +12,15 @@ pub const definition = definitions.Definition{
     .protocol = .@"openai-chat-completions",
     .base_url = endpoints.api_base_url,
     .auth = .{ .bearer = "OPENROUTER_API_KEY" },
-    // Until the live catalog lands, the default model is the only listed entry;
-    // its limits stay unknown rather than guessed.
-    .model_metadata = &.{.{ .id = model_provider.openrouter_default_model, .supports_tool_use = true }},
+    // Some upstream providers ignore tools unless tool_choice is explicit.
+    .tool_choice_mode = .send,
     .builtin = .openrouter,
+};
+
+/// App attribution OpenRouter shows in its rankings and the user's activity page.
+pub const attribution_headers = [_]std.http.Header{
+    .{ .name = "HTTP-Referer", .value = "https://fx.sh" },
+    .{ .name = "X-OpenRouter-Title", .value = "fx" },
 };
 
 /// Caller owns the returned URL.

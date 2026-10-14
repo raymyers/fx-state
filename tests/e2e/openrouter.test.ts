@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FX_BIN, runFx } from "../evals/eval-helpers";
-import { createOpenRouterFixture as fixture } from "./fixtures/openrouter";
+import { openRouterCompletion } from "./fixtures/chat-completions";
+import { createOpenRouterFixture as fixture, openRouterCatalog } from "./fixtures/openrouter";
 
 type Fixture = ReturnType<typeof fixture>;
 
@@ -54,10 +55,10 @@ describe("openrouter provider", () => {
       const parsed = JSON.parse(result.stdout);
       expect(parsed.output).toBe("openrouter reply");
       expect(parsed.model).toBe("anthropic/claude-sonnet-5.5");
-      expect(f.requests).toHaveLength(1);
-      expect(f.requests[0].path).toBe("/api/v1/chat/completions");
-      expect(f.requests[0].authorization).toBe("Bearer sk-or-test-key");
-      expect(f.requests[0].body.model).toBe("anthropic/claude-sonnet-5.5");
+      const chats = f.requests.filter((request) => request.path === "/api/v1/chat/completions");
+      expect(chats).toHaveLength(1);
+      expect(chats[0].authorization).toBe("Bearer sk-or-test-key");
+      expect(chats[0].body.model).toBe("anthropic/claude-sonnet-5.5");
       const status = JSON.parse((await runFx(["status", "--json"], { cwd: f.workspace, env: { ...f.env, FX_PROVIDER: "openrouter" } })).stdout);
       expect(status.model_source).toBe("OpenRouter");
       expect(status.auth).toBe("OPENROUTER_API_KEY");
@@ -123,9 +124,10 @@ describe("openrouter provider", () => {
       f.save();
       const resumed = await runFx(["ask", "--json", "--resume", session, "what was the word?"], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
       if (resumed.code !== 0) throw new Error(resumed.stdout + resumed.stderr);
-      expect(f.requests).toHaveLength(2);
-      expect(f.requests[1].authorization).toBe("Bearer sk-or-test-key");
-      expect(JSON.stringify(f.requests[1].body.messages)).toContain("remember the word lantern");
+      const chats = f.requests.filter((request) => request.path === "/api/v1/chat/completions");
+      expect(chats).toHaveLength(2);
+      expect(chats[1].authorization).toBe("Bearer sk-or-test-key");
+      expect(JSON.stringify(chats[1].body.messages)).toContain("remember the word lantern");
     } finally { f.close(); }
   }, 45000);
 
@@ -210,4 +212,69 @@ describe("openrouter provider", () => {
       expect(usage.stderr).toContain("usage: fx login [vercel|codex|grok|openrouter [--headless|--api-key]]");
     } finally { f.close(); }
   }, 60000);
+
+  test("fx models lists the live catalog and reuses a fresh cached copy", async () => {
+    const f = fixture(undefined, [
+      { id: "anthropic/claude-sonnet-5.5", context_length: 1_000_000 },
+      { id: "z-ai/glm-5", context_length: 200_000 },
+    ]);
+    try {
+      const env = { ...f.env, FX_PROVIDER: "openrouter" };
+      const listed = await runFx(["models", "--json"], { cwd: f.workspace, env });
+      if (listed.code !== 0) throw new Error(listed.stdout + listed.stderr);
+      expect(listed.stdout).toContain("z-ai/glm-5");
+      expect(f.requests.filter((request) => request.path === "/api/v1/models")).toHaveLength(1);
+      expect(f.requests.find((request) => request.path === "/api/v1/models")!.authorization).toBeNull();
+      expect(readFileSync(join(f.home, ".fx", "openrouter-models.json"), "utf8")).toContain("z-ai/glm-5");
+      // A fresh cache answers without the network.
+      const again = await runFx(["models", "--json"], { cwd: f.workspace, env });
+      expect(again.stdout).toContain("z-ai/glm-5");
+      expect(f.requests.filter((request) => request.path === "/api/v1/models")).toHaveLength(1);
+    } finally { f.close(); }
+  }, 30000);
+
+  test("chat requests carry attribution headers and an explicit tool choice", async () => {
+    const f = fixture();
+    try {
+      const result = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: f.workspace, env: { ...f.env, FX_PROVIDER: "openrouter" }, timeoutMs: 20000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      const chat = f.requests.find((request) => request.path === "/api/v1/chat/completions")!;
+      expect(chat.headers["http-referer"]).toBe("https://fx.sh");
+      expect(chat.headers["x-openrouter-title"]).toBe("fx");
+      expect(chat.body.tool_choice).toBe("auto");
+    } finally { f.close(); }
+  }, 30000);
+
+  test("an expired catalog cache is used when the refetch fails", async () => {
+    const f = fixture(undefined, null);
+    try {
+      const stale = await (openRouterCatalog([{ id: "cached/model" }])).text();
+      writeFileSync(join(f.home, ".fx", "openrouter-models.json"), `fx-openrouter-models-v1 1000\n${stale}`, { mode: 0o600 });
+      const listed = await runFx(["models", "--json"], { cwd: f.workspace, env: { ...f.env, FX_PROVIDER: "openrouter" } });
+      if (listed.code !== 0) throw new Error(listed.stdout + listed.stderr);
+      expect(listed.stdout).toContain("cached/model");
+      expect(f.requests.filter((request) => request.path === "/api/v1/models")).toHaveLength(1);
+    } finally { f.close(); }
+  }, 30000);
+
+  test("catalog limits drive automatic compaction and the output cap", async () => {
+    const f = fixture(
+      (body) => openRouterCompletion(body.model, "long reply " + "detail ".repeat(2000), Math.ceil(JSON.stringify(body).length / 4)),
+      [{ id: "tiny/model", context_length: 32_768, max_completion_tokens: 512 }],
+    );
+    f.settings.provider = "openrouter";
+    f.settings.models = { openrouter: "tiny/model" };
+    f.save();
+    let id: string | undefined;
+    try {
+      for (let turn = 0; turn < 12; turn++) {
+        const result = await runFx(["ask", "--json", ...(id ? ["--resume", id] : []), `Continue turn ${turn}`], { cwd: f.workspace, env: f.env, timeoutMs: 20000 });
+        if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+        id = JSON.parse(result.stdout).session_id;
+      }
+      const chats = f.requests.filter((request) => request.path === "/api/v1/chat/completions");
+      expect(chats.some((request) => JSON.stringify(request.body.messages).includes("<compacted_conversation>"))).toBe(true);
+      expect(chats.every((request) => request.body.model === "tiny/model" && request.body.max_tokens > 0 && request.body.max_tokens <= 512)).toBe(true);
+    } finally { f.close(); }
+  }, 120000);
 });

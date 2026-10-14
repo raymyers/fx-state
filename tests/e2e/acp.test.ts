@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createConfiguredProviderFixture, completion as configuredCompletion, openRouterCompletion } from "./fixtures/chat-completions";
+import { openRouterCatalog } from "./fixtures/openrouter";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
@@ -10342,6 +10343,7 @@ describe("acp: model catalog authentication", () => {
         hostname: "127.0.0.1",
         port: 0,
         async fetch(request) {
+          if (new URL(request.url).pathname === "/api/v1/models") return openRouterCatalog();
           const body = await request.json();
           requests.push({ authorization: request.headers.get("authorization"), model: body.model });
           return openRouterCompletion(body.model, "ACP_OPENROUTER_RESPONSE");

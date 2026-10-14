@@ -158,7 +158,10 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
         .client = &client,
         .uri = uri,
         .authorization = authorization,
-        .extra_headers = &.{.{ .name = "accept", .value = "text/event-stream" }},
+        .extra_headers = if (definition.builtin == .openrouter)
+            &([_]std.http.Header{.{ .name = "accept", .value = "text/event-stream" }} ++ openrouter.attribution_headers)
+        else
+            &.{.{ .name = "accept", .value = "text/event-stream" }},
     };
     try request.admission.admit();
     var opened = try client_mod.openBoundedPost(alloc, request.cancel_flag, phase_deadline(30_000, request.deadline), &operation);
