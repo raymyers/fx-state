@@ -180,7 +180,9 @@ Tasks:
 - [x] `napi_core_main.zig` and `wasm_core_main.zig`: accept `openrouter` with a host-supplied key, and add OpenRouter variants to `host_stream_provider` and `host_model_catalog`.
 - [x] `sdk/`: add type definitions, a provider string, an error code for a missing key, and a test under `sdk/tests/`. Update `sdk/README.md`.
 - [ ] `CHANGELOG.md`: add the entry in the next release PR, not in this PR.
+  - The breaking-change line for a custom connection named `openrouter` is in [docs-section.md](docs-section.md).
 - [ ] Manual at fx.sh/docs: open a companion PR for a new "OpenRouter" page under configure-fx, and update the custom-connections page to point to it. If the private repository is not accessible, add a `## Docs` section to the PR description instead.
+  - Drafted in [docs-section.md](docs-section.md), ready for the PR description. The published custom-connections page uses a connection named `openrouter`, which now fails to load, so the draft replaces that example and adds a breaking-change line for the release notes.
 - [x] `README.md`: change it only if its provider list would otherwise be wrong.
   - It named OpenRouter as a custom connection, which now fails to load, so the feature line and the `fx login` list changed.
 
