@@ -155,9 +155,11 @@ Goal: users can see what OpenRouter costs them. Label: `type: feature`.
 
 Tasks:
 
-- [ ] Write per-turn `cost`, cached tokens, and reasoning tokens to the durable usage ledger.
+- [x] Write per-turn `cost`, cached tokens, and reasoning tokens to the durable usage ledger.
+  - The per-turn usage saved in each session checkpoint now sums `cost`, and `fx ask --json` reports it.
 - [ ] `src/usage/openrouter.zig` and a `usage.zig` scope: read `GET /api/v1/key` and show usage, limit, and remaining credits. Add text and JSON rendering in `output_contracts.zig` from one snapshot.
 - [ ] 402 message with the credits link. 503 message that names the routing constraint, if one was set.
+  - Done: the 402 message, linking https://openrouter.ai/credits as OpenRouter's error docs do. Open: the 503 message, which depends on open question 2 because fx sends no routing constraints yet.
 - [ ] Map `provider_order` and `provider_strict` to `provider.order` and `allow_fallbacks`, if spec open question 2 is accepted.
 
 Deliverables and tests:

@@ -314,4 +314,20 @@ describe("openrouter provider", () => {
       expect(JSON.stringify(f.requests.at(-1)!.body)).not.toContain("cache_control");
     } finally { f.close(); }
   }, 45000);
+
+  test("an empty credit balance ends the turn once with the credits link, and cost reaches ask output", async () => {
+    const broke = fixture(() => Response.json({ error: { code: 402, message: "Insufficient credits" } }, { status: 402 }));
+    try {
+      const result = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: broke.workspace, env: { ...broke.env, FX_PROVIDER: "openrouter" }, timeoutMs: 20000 });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("OpenRouter credits exhausted. Add credits at https://openrouter.ai/credits");
+      expect(broke.requests.filter((request) => request.path === "/api/v1/chat/completions")).toHaveLength(1);
+    } finally { broke.close(); }
+    const paid = fixture();
+    try {
+      const result = await runFx(["ask", "--json", "--no-save", "say hello"], { cwd: paid.workspace, env: { ...paid.env, FX_PROVIDER: "openrouter" }, timeoutMs: 20000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      expect(JSON.parse(result.stdout).usage).toEqual({ input_tokens: 12, output_tokens: 3, cost: 0.000042 });
+    } finally { paid.close(); }
+  }, 45000);
 });

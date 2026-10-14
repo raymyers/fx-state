@@ -17,6 +17,9 @@ pub const definition = definitions.Definition{
     .builtin = .openrouter,
 };
 
+/// Replaces the body of a 402, which only says the key lacks credits.
+pub const credits_exhausted_message = "OpenRouter credits exhausted. Add credits at https://openrouter.ai/credits, then try again.";
+
 /// App attribution OpenRouter shows in its rankings and the user's activity page.
 pub const attribution_headers = [_]std.http.Header{
     .{ .name = "HTTP-Referer", .value = "https://fx.sh" },

@@ -4377,7 +4377,14 @@ fn renderFinalJsonResult(alloc: Allocator, result: PromptRunResult) ![]u8 {
         try out.writer.writeAll("}");
     }
     try out.writer.writeAll("],\"usage\":");
-    try std.json.Stringify.value(.{
+    // Cost appears only when the provider reported one, such as OpenRouter.
+    if (result.usage.cost) |cost| {
+        try std.json.Stringify.value(.{
+            .input_tokens = result.usage.input_tokens,
+            .output_tokens = result.usage.output_tokens,
+            .cost = cost,
+        }, .{}, &out.writer);
+    } else try std.json.Stringify.value(.{
         .input_tokens = result.usage.input_tokens,
         .output_tokens = result.usage.output_tokens,
     }, .{}, &out.writer);

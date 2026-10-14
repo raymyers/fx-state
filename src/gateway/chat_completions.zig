@@ -208,6 +208,10 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
             alloc.free(detail);
             detail = redacted;
         }
+        if (definition.builtin == .openrouter and response.head.status == .payment_required) {
+            alloc.free(detail);
+            detail = try alloc.dupe(u8, openrouter.credits_exhausted_message);
+        }
 
         return .{ .failed = .{ .kind = failure_kind(response.head.status), .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
