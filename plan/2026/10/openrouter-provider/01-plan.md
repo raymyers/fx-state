@@ -14,7 +14,7 @@ Tasks:
 - [x] `chat_completions_protocol.zig`: accept `finish_reason: "error"` and map it to a typed failure that keeps `error.message` and `error.code`.
 - [x] Keep the message from a mid-stream `{"error":...}` object instead of returning a bare `ProviderError`.
 - [x] After a finish, accept trailing chunks with empty or null-only deltas and a repeated identical `finish_reason`. Any other content after the finish is still rejected.
-- [ ] Parse `usage.cost`, `prompt_tokens_details.cached_tokens`, `cache_write_tokens`, and `completion_tokens_details.reasoning_tokens` into `types.Usage`.
+- [x] Parse `usage.cost`, `prompt_tokens_details.cached_tokens`, `cache_write_tokens`, and `completion_tokens_details.reasoning_tokens` into `types.Usage`.
 - [ ] `chat_completions.zig` `failure_kind`: classify 402 as insufficient credits (not retried) and 408 as timeout (retried).
 - [ ] `model_response_recovery.zig`: parse Retry-After as either seconds or an HTTP date. Keep the 30-second cap.
 

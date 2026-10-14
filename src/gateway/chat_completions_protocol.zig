@@ -915,9 +915,16 @@ pub const Reducer = struct {
             .output_tokens = try token_count(fields, "completion_tokens"),
         };
         const incoming_total = try token_count(fields, "total_tokens");
+        const prompt_details = try optional_object(fields, "prompt_tokens_details");
+        const completion_details = try optional_object(fields, "completion_tokens_details");
+        // Detail counts and cost describe the whole response; the latest report wins.
         const usage = types.Usage{
             .input_tokens = incoming.input_tokens orelse self.usage.input_tokens,
             .output_tokens = incoming.output_tokens orelse self.usage.output_tokens,
+            .cache_read_tokens = (if (prompt_details) |details| try token_count(details, "cached_tokens") else null) orelse self.usage.cache_read_tokens,
+            .cache_write_tokens = (if (prompt_details) |details| try token_count(details, "cache_write_tokens") else null) orelse self.usage.cache_write_tokens,
+            .reasoning_tokens = (if (completion_details) |details| try token_count(details, "reasoning_tokens") else null) orelse self.usage.reasoning_tokens,
+            .cost = try cost_value(fields) orelse self.usage.cost,
         };
         const total = incoming_total orelse self.usage_total;
         var final_fields = self.usage_final_fields;
@@ -1093,6 +1100,22 @@ fn index_value(value: std.json.Value) Error!usize {
 fn token_count(fields: std.json.ObjectMap, key: []const u8) Error!?u64 {
     const value = non_null(fields, key) orelse return null;
     return std.math.cast(u64, try integer(value)) orelse error.InvalidChunk;
+}
+
+fn optional_object(fields: std.json.ObjectMap, key: []const u8) Error!?std.json.ObjectMap {
+    return try object(non_null(fields, key) orelse return null);
+}
+
+fn cost_value(fields: std.json.ObjectMap) Error!?f64 {
+    const value = non_null(fields, "cost") orelse return null;
+    const cost = switch (value) {
+        .integer => @as(f64, @floatFromInt(value.integer)),
+        .float => value.float,
+        .number_string => std.fmt.parseFloat(f64, value.number_string) catch return error.InvalidChunk,
+        else => return error.InvalidChunk,
+    };
+    if (!std.math.isFinite(cost) or cost < 0) return error.InvalidChunk;
+    return cost;
 }
 
 fn append_bounded(alloc: Allocator, destination: *std.ArrayList(u8), text: []const u8, limit: usize, failure: Error) Error!void {
@@ -2350,6 +2373,42 @@ test "chat completions provider error results release allocations on failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Probe.run, .{});
+}
+
+test "chat completions usage keeps cost cache and reasoning details" {
+    const alloc = std.testing.allocator;
+    var reducer = try Reducer.init(alloc, test_request(), .{});
+    defer reducer.deinit();
+    try test_accept(&reducer, test_text);
+    try test_accept(&reducer, test_stop);
+    // OpenRouter's trailing usage chunk.
+    try test_accept(&reducer, "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":30,\"total_tokens\":130,\"cost\":0.0012345,\"is_byok\":false,\"cost_details\":{\"upstream_inference_cost\":null},\"prompt_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":15,\"audio_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":12,\"image_tokens\":0}}}");
+    try test_accept(&reducer, "{\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":30,\"total_tokens\":130,\"prompt_tokens_details\":null}}");
+    try test_accept(&reducer, "[DONE]");
+    var result = try reducer.finish(false);
+    defer result.deinit(alloc);
+    const usage = result.completed.completion.usage;
+    try std.testing.expectEqual(@as(?u64, 100), usage.input_tokens);
+    try std.testing.expectEqual(@as(?u64, 30), usage.output_tokens);
+    try std.testing.expectEqual(@as(?u64, 80), usage.cache_read_tokens);
+    try std.testing.expectEqual(@as(?u64, 15), usage.cache_write_tokens);
+    try std.testing.expectEqual(@as(?u64, 12), usage.reasoning_tokens);
+    try std.testing.expectEqual(@as(?f64, 0.0012345), usage.cost);
+
+    for ([_][]const u8{
+        "{\"prompt_tokens\":1,\"cost\":-0.5}",
+        "{\"prompt_tokens\":1,\"cost\":\"0.5\"}",
+        "{\"prompt_tokens\":1,\"cost\":1e999}",
+        "{\"prompt_tokens\":1,\"prompt_tokens_details\":[]}",
+        "{\"prompt_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":-1}}",
+        "{\"prompt_tokens\":1,\"completion_tokens_details\":{\"reasoning_tokens\":1.5}}",
+    }) |invalid| {
+        var rejected = try Reducer.init(alloc, test_request(), .{});
+        defer rejected.deinit();
+        const chunk = try alloc.print("{{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"x\"}}}}],\"usage\":{s}}}", .{invalid});
+        defer alloc.free(chunk);
+        try std.testing.expectError(error.InvalidChunk, rejected.accept(chunk, false));
+    }
 }
 
 test "chat completions accepts empty trailing chunks after the finish" {

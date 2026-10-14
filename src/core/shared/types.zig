@@ -1596,6 +1596,8 @@ pub const Usage = struct {
     cache_read_tokens: ?u64 = null,
     cache_write_tokens: ?u64 = null,
     reasoning_tokens: ?u64 = null,
+    /// Provider-reported charge in USD credits, such as OpenRouter's `usage.cost`.
+    cost: ?f64 = null,
 };
 
 /// Absolute per-turn token totals. Input covers only user-submitted prompt text
