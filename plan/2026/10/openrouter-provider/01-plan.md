@@ -128,8 +128,8 @@ Deliverables and tests:
 - Unit tests: catalog parsing (missing fields, oversized body, non-tool models filtered out), cache time-to-live and stale fallback, header injection, and `max_tokens` capping.
 - Fake server: add `/models` to `fixtures/openrouter.ts`.
 - `openrouter.test.ts` cases: `/model` lists fake catalog models, automatic compaction triggers below the fake context limit, a generated session title, an auto-mode review that forces its tool call, and attribution headers asserted by the fake server.
-- Startup check: run `./benchmarks/startup.sh --quick` locally and confirm `fx help` does not change.
-- Reconsider the PGSO classification. If the catalog and stream path now carries common product behavior, move it to **Training**.
+- Startup check: run `./benchmarks/startup.sh --quick` locally and confirm `fx help` does not change. Done on macOS arm64 with hyperfine directly, comparing ReleaseSafe builds over 100 runs: `main` 2.8 ms ± 0.6, this branch 2.6 ms ± 0.3.
+- Reconsider the PGSO classification. If the catalog and stream path now carries common product behavior, move it to **Training**. Kept as **Verification-only**: OpenRouter is opt-in rather than the default path, and its stream path is the shared chat completions code that `configured-providers.test.ts` already covers.
 
 ## Milestone 4: Reasoning and prompt caching
 
