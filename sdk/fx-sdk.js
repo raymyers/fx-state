@@ -7,6 +7,9 @@ import { loadModule } from "./wasm-module.js";
 
 // Providers that run on a user's plan, authorized by the host's credentials.
 const subscriptionProviders = new Set(["codex", "grok"]);
+// OpenRouter runs on the host's key, added at the fetch edge to this URL only.
+const openRouterProvider = Object.freeze({ name: "openrouter", chatUrl: "https://openrouter.ai/api/v1/chat/completions" });
+const openRouterDefaultModel = "anthropic/claude-sonnet-5.5";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -157,19 +160,37 @@ export function normalizeAgentOptions(value) {
   const custom = options.provider !== null && typeof options.provider === "object"
     ? customProviderDefinition(options.provider)
     : undefined;
-  if (!custom && options.provider !== undefined && options.provider !== "gateway" && !subscriptionProviders.has(options.provider)) {
-    throw new TypeError("provider must be \"gateway\", \"codex\", \"grok\" or a custom provider { name, baseUrl }");
+  const openrouter = options.provider === "openrouter";
+  if (!custom && options.provider !== undefined && options.provider !== "gateway" && !openrouter && !subscriptionProviders.has(options.provider)) {
+    throw new TypeError("provider must be \"gateway\", \"codex\", \"grok\", \"openrouter\" or a custom provider { name, baseUrl }");
   }
   options.customProvider = custom;
   options.providerName = custom ? custom.name : options.provider;
   const subscription = subscriptionProviders.has(options.provider);
   // Gateway needs its key; every other provider runs on the host's credentials.
-  options.apiKey = boundedString(options.apiKey, "apiKey", maxApiKeyBytes, !subscription && !custom);
+  options.apiKey = boundedString(options.apiKey, "apiKey", maxApiKeyBytes, !subscription && !custom && !openrouter);
+  if (openrouter) {
+    // The engine would read apiKey as a Gateway key, so OpenRouter's key moves
+    // to the fetch edge as credentials().
+    if (options.apiKey !== undefined && options.credentials !== undefined) {
+      throw new TypeError("provider \"openrouter\" takes apiKey or credentials(), not both");
+    }
+    if (options.apiKey !== undefined) {
+      const apiKey = options.apiKey;
+      options.credentials = () => ({ apiKey });
+      options.apiKey = undefined;
+    }
+    if (options.credentials === undefined) {
+      const error = new TypeError("provider \"openrouter\" needs an apiKey or a credentials() function");
+      error.code = "FX_OPENROUTER_KEY_REQUIRED";
+      throw error;
+    }
+  }
   if (subscription && typeof options.credentials !== "function") {
     throw new TypeError(`provider "${options.provider}" needs a credentials() function`);
   }
-  if (!subscription && !custom && options.credentials !== undefined) {
-    throw new TypeError("credentials needs provider \"codex\", \"grok\" or a custom provider");
+  if (!subscription && !custom && !openrouter && options.credentials !== undefined) {
+    throw new TypeError("credentials needs provider \"codex\", \"grok\", \"openrouter\" or a custom provider");
   }
   // A custom provider's key is never refreshed, so it has no onCredentials or refreshLock.
   for (const name of ["onCredentials", "refreshLock"]) {
@@ -181,6 +202,9 @@ export function normalizeAgentOptions(value) {
   Object.assign(options, normalizeModelChoice(options));
   // fx's default model is a Gateway id; a custom provider names its own.
   if (custom && options.model === undefined) throw new TypeError("a custom provider needs a model");
+  // The engine's default is a Gateway id; OpenRouter gets fx's OpenRouter default
+  // (model_provider.openrouter_default_model).
+  if (openrouter && options.model === undefined) options.model = openRouterDefaultModel;
   validateGatewayChatUrl(options.gatewayChatUrl);
   if (options.resizeImage !== undefined && typeof options.resizeImage !== "function") {
     throw new TypeError("resizeImage must be a function");
@@ -2498,7 +2522,9 @@ export async function createFxEngine(options = {}) {
     ? createSubscriptionAuthorizer([codexSubscription, grokSubscription], { credentials: options.credentials, onCredentials: options.onCredentials, refreshLock: options.refreshLock, fetch: hostFetch, memory: options[credentialMemory] })
     : options.customProvider && options.credentials
       ? createSubscriptionAuthorizer([customProviderSpec(options.customProvider, () => sessionId)], { credentials: options.credentials, fetch: hostFetch })
-      : null;
+      : options.provider === "openrouter"
+        ? createSubscriptionAuthorizer([customProviderSpec(openRouterProvider, () => sessionId)], { credentials: options.credentials, fetch: hostFetch })
+        : null;
   const transportFetch = async (input, init = {}) => {
     const method = String(init.method ?? input?.method ?? "GET").toUpperCase();
     let endpoint = String(input?.url ?? input);

@@ -174,11 +174,12 @@ Goal: SDK parity and user documentation. Label: `type: feature`. Read `sdk/AGENT
 
 Tasks:
 
-- [ ] `napi_core_main.zig` and `wasm_core_main.zig`: accept `openrouter` with a host-supplied key, and add OpenRouter variants to `host_stream_provider` and `host_model_catalog`.
-- [ ] `sdk/`: add type definitions, a provider string, an error code for a missing key, and a test under `sdk/tests/`. Update `sdk/README.md`.
+- [x] `napi_core_main.zig` and `wasm_core_main.zig`: accept `openrouter` with a host-supplied key, and add OpenRouter variants to `host_stream_provider` and `host_model_catalog`.
+- [x] `sdk/`: add type definitions, a provider string, an error code for a missing key, and a test under `sdk/tests/`. Update `sdk/README.md`.
 - [ ] `CHANGELOG.md`: add the entry in the next release PR, not in this PR.
 - [ ] Manual at fx.sh/docs: open a companion PR for a new "OpenRouter" page under configure-fx, and update the custom-connections page to point to it. If the private repository is not accessible, add a `## Docs` section to the PR description instead.
-- [ ] `README.md`: change it only if its provider list would otherwise be wrong.
+- [x] `README.md`: change it only if its provider list would otherwise be wrong.
+  - It named OpenRouter as a custom connection, which now fails to load, so the feature line and the `fx login` list changed.
 
 Deliverables and tests:
 

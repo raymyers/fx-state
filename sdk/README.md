@@ -25,7 +25,7 @@ for await (const event of turn) {
 await agent.close();
 ```
 
-Set `AI_GATEWAY_API_KEY` and run it with Node.js 20 or newer. Model calls go through [AI Gateway](https://vercel.com/docs/ai-gateway), so any model it lists works, and on Vercel libfx uses the deployment's OIDC token instead of a key. libfx can also run on a user's own ChatGPT or Grok plan, or on another server through the OpenAI Chat Completions API. See [Providers](#providers).
+Set `AI_GATEWAY_API_KEY` and run it with Node.js 20 or newer. Model calls go through [AI Gateway](https://vercel.com/docs/ai-gateway), so any model it lists works, and on Vercel libfx uses the deployment's OIDC token instead of a key. libfx can also run on a user's own ChatGPT or Grok plan, on an OpenRouter key, or on another server through the OpenAI Chat Completions API. See [Providers](#providers).
 
 Importing libfx and calling `createFxAgent()` touch no network, files or processes. The engine loads when a session runs its first turn.
 
@@ -366,23 +366,39 @@ refreshLock: ({ provider, sessionId }, refresh) => locks.withLock(`${provider}:$
 
 libfx calls it with a function to run while you hold a lock on that user's account, for example in Redis. Inside it, libfx calls `credentials()` again and uses what another server already saved.
 
+### OpenRouter
+
+`provider: "openrouter"` runs on an OpenRouter API key. Pass the key as `apiKey`, or return it from `credentials`, which is called with `provider: "openrouter"`:
+
+```js
+const agent = createFxAgent({
+  provider: "openrouter",
+  model: "openai/gpt-5",
+  credentials: async ({ sessionId }) => ({ apiKey: await keys.load("openrouter", sessionId) }),
+});
+```
+
+Without `model`, the agent runs `anthropic/claude-sonnet-5.5`. libfx reads OpenRouter's public model list for context windows and output limits. Without `apiKey` or `credentials`, `createFxEngine()` and `createFxAgent()` throw a `TypeError` with code `FX_OPENROUTER_KEY_REQUIRED`. A key isn't refreshed, so a rejected one ends the turn with OpenRouter's error, and an exhausted credit balance ends it with a link to add credits. `AI_GATEWAY_API_KEY` never stands in for an OpenRouter key.
+
 ### Custom providers
 
 An agent can run on a server that speaks the OpenAI Chat Completions API, such as a local model server or a router:
 
 ```js
-const router = {
-  name: "router",
-  baseUrl: "https://openrouter.ai/api/v1",
+const local = {
+  name: "local",
+  baseUrl: "https://models.example.com/v1",
   models: { "qwen/qwen3-coder": { contextWindow: 128000, supportsToolUse: true } },
 };
 
 const agent = createFxAgent({
-  provider: router,
+  provider: local,
   model: "qwen/qwen3-coder",
   credentials: async ({ provider, sessionId }) => ({ apiKey: await keys.load(provider, sessionId) }),
 });
 ```
+
+A custom provider can't be named `gateway`, `codex`, `grok` or `openrouter`.
 
 Requests go to `{baseUrl}/chat/completions`, which must use HTTPS, or HTTP on `localhost`. Leave out `credentials` for a server that needs no key. `models` tells libfx what it can't ask the server: each model's context window and output limit, and whether it takes tools and images. A key isn't refreshed, so a rejected one ends the turn with the server's error. In a browser, the server must accept cross-origin requests, and the page can read the key.
 
@@ -390,7 +406,7 @@ Saved sessions follow the agent's provider: point an agent at another base URL a
 
 ### Where credentials go
 
-libfx adds ChatGPT, Grok and custom-provider credentials to each request in JavaScript, just before it's sent, and sends them only to that provider. They never reach the engine. No credential is written to a saved session or passed to `onEvent`, and if a server quotes a key or token back in an error, libfx masks it before the error reaches the turn.
+libfx adds ChatGPT, Grok, OpenRouter and custom-provider credentials to each request in JavaScript, just before it's sent, and sends them only to that provider. An OpenRouter key goes only to OpenRouter's chat URL, not to its model list. They never reach the engine. No credential is written to a saved session or passed to `onEvent`, and if a server quotes a key or token back in an error, libfx masks it before the error reaches the turn.
 
 ## Images
 

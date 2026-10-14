@@ -34,6 +34,7 @@ export type {
   FxFollowUp,
   FxGatewayProvider,
   FxGrokProvider,
+  FxOpenRouterProvider,
   FxHostTool,
   FxImageBlock,
   FxJsonSchema,

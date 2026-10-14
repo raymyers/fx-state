@@ -20,6 +20,7 @@ const scripts = [
   "test-chatgpt-sign-in.mjs",
   "test-agent-grok.mjs",
   "test-agent-custom.mjs",
+  "test-agent-openrouter.mjs",
   "test-grok-sign-in.mjs",
   "test-native-core-stream.mjs",
   "test-native-core-http-cleanup.mjs",

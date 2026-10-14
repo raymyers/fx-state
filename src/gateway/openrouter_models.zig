@@ -293,7 +293,7 @@ const Remembered = struct {
 var remembered_mutex: std.Io.Mutex = .init;
 var remembered: []Remembered = &.{};
 
-fn remember(entries: []const model_catalog.ModelCatalogEntry) void {
+pub fn remember(entries: []const model_catalog.ModelCatalogEntry) void {
     const alloc = std.heap.c_allocator;
     var next = alloc.alloc(Remembered, entries.len) catch return;
     var filled: usize = 0;
