@@ -382,4 +382,45 @@ describe("openrouter provider", () => {
       expect(f.requests.filter((request) => request.path === "/api/v1/chat/completions" && request.body.provider?.allow_fallbacks === false && request.body.provider.order.length === 1)).toHaveLength(1);
     } finally { f.close(); }
   }, 45000);
+
+  test("one fx process reuses its OpenRouter connection across a tool turn", async () => {
+    let calls = 0;
+    const f = fixture((body) => ++calls === 1 ? toolCompletion(body.model, "read_file", { path: "note.txt" }) : openRouterCompletion(body.model, "read it"));
+    try {
+      writeFileSync(join(f.workspace, "note.txt"), "pooled");
+      const result = await runFx(["ask", "--json", "--no-save", "Read note.txt"], { cwd: f.workspace, env: { ...f.env, FX_PROVIDER: "openrouter" }, timeoutMs: 20000 });
+      if (result.code !== 0) throw new Error(result.stdout + result.stderr);
+      const chats = turnRequests(f);
+      expect(chats).toHaveLength(2);
+      expect(chats[0].port).toBeGreaterThan(0);
+      expect(chats[1].port).toBe(chats[0].port);
+    } finally { f.close(); }
+  }, 30000);
+
+  test.each(["headers", "stream"])("cancellation stops a stalled pooled OpenRouter %s without replaying the POST", async (phase) => {
+    const f = fixture(() => phase === "headers"
+      ? new Promise<Response>(() => {})
+      : new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n')); } }), { headers: { "content-type": "text/event-stream" } }));
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries({ ...process.env, ...f.env, FX_PROVIDER: "openrouter" })) if (value !== undefined) env[key] = value;
+    const child = Bun.spawn([FX_BIN, "ask", "--json", "--no-save", "hello"], { cwd: f.workspace, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    let forced = false;
+    const timer = setTimeout(() => { forced = true; child.kill("SIGKILL"); }, 8000);
+    try {
+      const until = Date.now() + 5000;
+      while (turnRequests(f).length === 0 && child.exitCode === null && Date.now() < until) await Bun.sleep(10);
+      expect(turnRequests(f)).toHaveLength(1);
+      child.kill("SIGINT");
+      expect(await child.exited).toBe(130);
+      expect(forced).toBe(false);
+      expect(turnRequests(f)).toHaveLength(1);
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+      await output;
+      f.close();
+    }
+  }, 12000);
 });

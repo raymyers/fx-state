@@ -5,7 +5,7 @@ import { openRouterCompletion } from "./chat-completions";
 
 import { createHash } from "node:crypto";
 
-export type OpenRouterRequest = { path: string; authorization: string | null; body: any; headers: Record<string, string> };
+export type OpenRouterRequest = { path: string; authorization: string | null; body: any; headers: Record<string, string>; port: number };
 
 type PendingCode = { challenge: string; method: string; used: boolean };
 
@@ -55,7 +55,7 @@ export function createOpenRouterFixture(respond?: (body: any) => Response | Prom
       const url = new URL(request.url);
       const path = url.pathname;
       const body = request.method === "POST" ? await request.json() : null;
-      requests.push({ path, authorization: request.headers.get("authorization"), body, headers: Object.fromEntries(request.headers) });
+      requests.push({ path, authorization: request.headers.get("authorization"), body, headers: Object.fromEntries(request.headers), port: server.requestIP(request)?.port ?? 0 });
       if (path === "/api/v1/models") return catalog ? openRouterCatalog(catalog) : new Response("unavailable", { status: 503 });
       if (path === "/auth") {
         authorizations.push(url.searchParams);

@@ -49,7 +49,7 @@ Deliverables and tests:
 - Zig unit tests in `chat_completions_protocol.zig` that replay every recorded stream through `Reducer`, plus table cases for each new finish and error shape.
 - Unit tests for the `failure_kind` mapping and for Retry-After date parsing.
 - E2E: extend `tests/e2e/fixtures/chat-completions.ts` with SSE comment lines, a trailing usage chunk, and `finish_reason: "error"`. Add cases to `configured-providers.test.ts`. The file's existing corpus and shard entries stay as they are.
-- Manual check: a custom connection to real OpenRouter completes a tool turn in `./zig-out/bin/fx`.
+- Manual check: a custom connection to real OpenRouter completes a tool turn in `./zig-out/bin/fx`. Done on 2026-10-14 with openai/gpt-5-nano through a connection named `orcustom`, and again through the built-in provider.
 
 ## Milestone 1: Built-in provider with an environment key
 
@@ -104,7 +104,7 @@ Deliverables and tests:
 - Fake server: add `/auth`, which redirects to the callback with a code, and `/auth/keys` and `/key` to `fixtures/openrouter.ts`.
 - `openrouter.test.ts`: browser sign-in end to end with the fake opener, headless code paste, `--api-key`, logout, and the env key overriding a stored key.
 - Extend `tui-auth-source-selection.test.ts`: sign in from the `/login` picker.
-- Manual check: `./zig-out/bin/fx login openrouter` against real OpenRouter in a real browser, then a turn with the stored key.
+- Manual check: `./zig-out/bin/fx login openrouter` against real OpenRouter in a real browser, then a turn with the stored key. Partly done on 2026-10-14: `--api-key` validated the real key through `/api/v1/key`, then `fx usage`, status, and logout worked against the live service. The browser sign-in still needs a person at a browser.
 
 ## Milestone 3: Model catalog, request dialect, reviewer, and titles
 
@@ -115,8 +115,8 @@ Tasks:
 - [x] `src/gateway/openrouter_models.zig`: fetch `/models?supported_parameters=tools` (1 MiB cap, 30-second timeout) and map entries to `ModelCapabilities` (context window, output limit, vision, reasoning).
 - [x] Cache the catalog on disk under `~/.fx/` with a time-to-live and use the stale copy if a fetch fails. Fetch only when `openrouter` is the active provider, to protect the startup budget.
 - [x] Provide `cli_model_catalog` and `model_catalog`, so `/model` and `fx models` list catalog models with their context size.
-- [ ] `src/gateway/openrouter.zig`: wrap the shared protocol. Add the `HTTP-Referer` and `X-OpenRouter-Title` headers, always send `tool_choice`, take `max_tokens` from the catalog, and reuse a pooled HTTP client.
-  - Done: attribution headers, `tool_choice`, and `max_tokens` from catalog capabilities. Open: the pooled HTTP client; each request still opens its own connection.
+- [x] `src/gateway/openrouter.zig`: wrap the shared protocol. Add the `HTTP-Referer` and `X-OpenRouter-Title` headers, always send `tool_choice`, take `max_tokens` from the catalog, and reuse a pooled HTTP client.
+  - Attribution headers, `tool_choice`, `max_tokens` from catalog capabilities, and a process-lifetime connection pool. The pool drains each stream's body under a 2-second watch before reusing the connection.
 - [x] When a model is missing from the catalog, warn once and fall back to unknown limits.
   - The interactive session warns once per model after the catalog loads. `fx ask` falls back silently, because it resolves capabilities inside the turn loop.
 - [x] `src/gateway/openrouter_permission_reviewer.zig`: use a fixed reviewer model (spec open question 1) with a forced tool call.

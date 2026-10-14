@@ -163,12 +163,17 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     defer alloc.free(url);
     const authorization = if (token) |value| try alloc.print("Bearer {s}", .{value}) else null;
     defer if (authorization) |value| secret.zeroAndFree(alloc, value);
-    var client: std.http.Client = .{ .allocator = alloc, .io = io.getIo() };
-    defer client.deinit();
+    // OpenRouter keeps one connection pool for the process; other connections
+    // dial per request.
+    const pool = if (definition.builtin == .openrouter) openrouter.pool() else null;
+    var local_client: std.http.Client = .{ .allocator = alloc, .io = io.getIo() };
+    defer local_client.deinit();
+    const client = if (pool) |shared| shared.clientFor(url) else &local_client;
     var uri = try std.Uri.parse(url);
     uri.scheme = if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) "https" else if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) "http" else return error.UnsupportedUriScheme;
     var operation = client_mod.PostOperation{
-        .client = &client,
+        .client = client,
+        .keep_alive = pool != null,
         .uri = uri,
         .authorization = authorization,
         .extra_headers = if (definition.builtin == .openrouter)
@@ -233,7 +238,22 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
 
         return .{ .failed = .{ .kind = kind, .detail = detail, .retry_after_seconds = retry_after, .ownership = .owned } };
     }
-    return consume(alloc, reader, request);
+    const result = try consume(alloc, reader, request);
+    if (pool) |shared| {
+        // The stream ends at [DONE], before the body's end; std returns a
+        // connection to the pool only once the body is read through. A short
+        // watch bounds the drain, and a failed drain just closes the connection.
+        watch.stop();
+        var drain_watch: client_mod.CancelWatch = .{};
+        if (http.connection) |connection| drain_watch.start(request.cancel_flag, phase_deadline(client_mod.pool_drain_budget_ms, null), connection.stream_writer.stream) catch {
+            return result;
+        };
+        defer drain_watch.stop();
+        if (reader.discardRemaining()) |_| shared.noteActivity() else |err| {
+            debug_trace.logf("gateway", "openrouter pool drain failed err={s}", .{@errorName(err)});
+        }
+    }
+    return result;
 }
 
 pub fn failure_kind(status: std.http.Status) streams.FailureKind {

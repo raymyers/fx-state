@@ -220,7 +220,7 @@ const gateway_retry_base_delay_ns: u64 = 150 * std.time.ns_per_ms;
 /// Max time the post-stream body drain may take before the pooled connection
 /// is abandoned instead of reused. The response is already complete at this
 /// point; only connection reuse is at stake.
-const pool_drain_budget_ms: i64 = 2_000;
+pub const pool_drain_budget_ms: i64 = 2_000;
 const gateway_connection_setup_timeout_ms: i64 = 30_000;
 const gateway_retry_after_max_ns: u64 = 5 * std.time.ns_per_s;
 const gateway_transfer_buffer_bytes: usize = 256 * 1024;
@@ -2244,6 +2244,8 @@ pub const PostOperation = struct {
     uri: std.Uri,
     authorization: ?[]const u8,
     extra_headers: []const std.http.Header = &.{},
+    /// Only a pooled client keeps the connection open for the next request.
+    keep_alive: bool = false,
 
     pub fn run(self: *PostOperation) !OpenedPost {
         var headers: std.http.Client.Request.Headers = .{
@@ -2255,7 +2257,7 @@ pub const PostOperation = struct {
         return .{ .request = try self.client.request(.POST, self.uri, .{
             .headers = headers,
             .extra_headers = self.extra_headers,
-            .keep_alive = false,
+            .keep_alive = self.keep_alive,
             .redirect_behavior = .unhandled,
         }) };
     }

@@ -4,6 +4,8 @@ const std = @import("std");
 const definitions = @import("../core/config/configured_provider.zig");
 const endpoints = @import("../core/config/openrouter_endpoints.zig");
 const types = @import("../core/shared/types.zig");
+const http_pool = @import("../core/shared/http_pool.zig");
+const io_mod = @import("../core/shared/io.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -60,6 +62,22 @@ pub const attribution_headers = [_]std.http.Header{
     .{ .name = "HTTP-Referer", .value = "https://fx.sh" },
     .{ .name = "X-OpenRouter-Title", .value = "fx" },
 };
+
+var pool_mutex: std.Io.Mutex = .init;
+var pool_ready = false;
+var pool_storage: http_pool.HttpPool = undefined;
+
+/// The process-lifetime connection pool for OpenRouter's chat requests, so
+/// turns after the first skip the TLS handshake. Never freed.
+pub fn pool() *http_pool.HttpPool {
+    pool_mutex.lockUncancelable(io_mod.getIo());
+    defer pool_mutex.unlock(io_mod.getIo());
+    if (!pool_ready) {
+        pool_storage = .init(std.heap.c_allocator);
+        pool_ready = true;
+    }
+    return &pool_storage;
+}
 
 /// Caller owns the returned URL.
 pub fn chat_url(alloc: Allocator) ![]u8 {
