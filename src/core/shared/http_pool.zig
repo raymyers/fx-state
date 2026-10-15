@@ -145,7 +145,27 @@ pub const HttpPool = struct {
     /// this origin. Call once per request, before opening.
     pub fn clientFor(self: *HttpPool, url: []const u8) *std.http.Client {
         self.drainIfStale(url);
+        self.refreshTlsClock();
         return &self.client;
+    }
+
+    /// std.http.Client sets the time it checks certificate validity against
+    /// on its first HTTPS request and never advances it. A process-long client
+    /// would then reject every certificate the server starts using later as
+    /// not yet valid, and every retry would fail the same way. Advance it
+    /// before each request. A client that has not loaded its root
+    /// certificates keeps `now` null so std still loads them on first use.
+    /// `now` is never set back to null, because std reads `now.?` outside the
+    /// lock while it connects; that unlocked read sees either the old or the
+    /// new time, both valid.
+    fn refreshTlsClock(self: *HttpPool) void {
+        if (comptime std.http.Client.disable_tls) return;
+        const client = &self.client;
+        const io = client.io;
+        client.ca_bundle_lock.lockUncancelable(io);
+        defer client.ca_bundle_lock.unlock(io);
+        if (client.now == null) return;
+        client.now = std.Io.Clock.real.now(io);
     }
 
     fn drainIfStale(self: *HttpPool, url: []const u8) void {
@@ -216,6 +236,23 @@ test "drainIfStale skips within-ttl and never-active pools" {
     pool.ttl_ms = 0; // force stale on next call; empty pool drains zero
     _ = pool.clientFor("https://ai-gateway.vercel.sh/v4/ai/language-model");
     try std.testing.expect(pool.last_activity_ms.load(.acquire) >= stamp);
+}
+
+test "clientFor advances the certificate clock of a loaded client" {
+    var pool = HttpPool.init(std.testing.allocator);
+    defer _ = pool.deinit();
+    const url = "https://ai-gateway.vercel.sh/v4/ai/language-model";
+
+    _ = pool.clientFor(url);
+    try std.testing.expect(pool.client.now == null);
+
+    // A client that loaded its root certificates a day ago, before the server
+    // started using a certificate issued an hour ago.
+    const zio = io_mod.getIo();
+    const issued = std.Io.Clock.real.now(zio).subDuration(.fromSeconds(3600));
+    pool.client.now = issued.subDuration(.fromSeconds(23 * 3600));
+    _ = pool.clientFor(url);
+    try std.testing.expect(pool.client.now.?.nanoseconds > issued.nanoseconds);
 }
 
 test "warmAsync is a no-op in test builds" {
